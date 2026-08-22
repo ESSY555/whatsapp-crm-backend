@@ -16,6 +16,7 @@ return new class extends Migration
             $table->foreignId('business_id')->constrained()->cascadeOnDelete();
             $table->foreignId('user_id')->constrained()->cascadeOnDelete();
             $table->string('role')->default('member');
+            $table->string('status')->default('active');
             $table->timestamps();
         });
     }

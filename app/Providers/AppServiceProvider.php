@@ -11,7 +11,9 @@ class AppServiceProvider extends ServiceProvider
      */
     public function register(): void
     {
-        //
+        $this->app->singleton(\App\Tenancy\TenantContext::class, function () {
+            return new \App\Tenancy\TenantContext();
+        });
     }
 
     /**
