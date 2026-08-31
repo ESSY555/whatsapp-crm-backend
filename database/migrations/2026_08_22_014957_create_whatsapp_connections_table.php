@@ -13,7 +13,17 @@ return new class extends Migration
     {
         Schema::create('whatsapp_connections', function (Blueprint $table) {
             $table->id();
+            $table->foreignId('business_id')->constrained()->cascadeOnDelete();
+            $table->string('phone_number_id');
+            $table->string('business_account_id')->nullable();
+            $table->text('access_token_encrypted');
+            $table->string('status')->default('active');
+            $table->timestamp('connected_at')->nullable();
+            $table->timestamp('last_verified_at')->nullable();
             $table->timestamps();
+
+            $table->unique(['business_id', 'phone_number_id']);
+            $table->index(['business_id', 'status']);
         });
     }
 

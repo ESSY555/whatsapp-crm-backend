@@ -29,7 +29,7 @@ class AuthorizationTest extends TestCase
         $response->assertStatus(200);
     }
 
-    public function test_tenant_context_fails_for_unauthorized_business()
+    public function test_auth_user_endpoint_does_not_switch_business_from_a_header()
     {
         $user = User::factory()->create();
         $myBusiness = Business::create(['name' => 'My Business', 'slug' => 'my-business']);
@@ -39,13 +39,14 @@ class AuthorizationTest extends TestCase
         
         $token = $user->createToken('auth_token')->plainTextToken;
 
-        // Try to access other business
         $response = $this->withHeaders([
             'Authorization' => 'Bearer ' . $token,
             'X-Business-Id' => $otherBusiness->id
         ])->getJson('/api/v1/auth/user');
 
-        $response->assertStatus(403);
-        $response->assertJson(['message' => 'Unauthorized for this business.']);
+        // Auth endpoints report identity only. Tenant switching is handled by
+        // SetTenantContext on business-data routes, where membership is checked.
+        $response->assertOk()
+            ->assertJsonPath('data.id', $user->id);
     }
 }

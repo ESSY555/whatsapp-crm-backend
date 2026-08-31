@@ -6,6 +6,7 @@ use Illuminate\Database\Eloquent\Model;
 
 use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Business extends Model
 {
@@ -22,5 +23,10 @@ class Business extends Model
         return $this->belongsToMany(User::class, 'business_users')
             ->withPivot('role', 'status')
             ->withTimestamps();
+    }
+
+    public function settings(): HasMany
+    {
+        return $this->hasMany(BusinessSetting::class);
     }
 }

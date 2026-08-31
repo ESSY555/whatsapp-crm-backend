@@ -17,7 +17,8 @@ trait BelongsToBusiness
         static::addGlobalScope(new BusinessScope);
 
         static::creating(function ($model) {
-            if (empty($model->business_id) && TenantManager::has()) {
+            // The current tenant, never request data, owns the record.
+            if (TenantManager::has()) {
                 $model->business_id = TenantManager::businessId();
             }
         });

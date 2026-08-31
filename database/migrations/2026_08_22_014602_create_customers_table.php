@@ -14,12 +14,21 @@ return new class extends Migration
         Schema::create('customers', function (Blueprint $table) {
             $table->id();
             $table->foreignId('business_id')->constrained()->cascadeOnDelete();
-            $table->foreignId('customer_group_id')->nullable()->constrained()->nullOnDelete();
             $table->string('name');
+            $table->string('business_name')->nullable();
             $table->string('phone')->nullable();
             $table->string('email')->nullable();
+            $table->text('address')->nullable();
+            $table->string('category')->nullable();
+            $table->text('notes')->nullable();
+            $table->string('status')->default('active');
             $table->timestamps();
             $table->softDeletes();
+
+            $table->index('business_id');
+            $table->index(['business_id', 'phone']);
+            $table->index(['business_id', 'email']);
+            $table->index(['business_id', 'name']);
         });
     }
 

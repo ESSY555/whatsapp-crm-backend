@@ -13,7 +13,15 @@ return new class extends Migration
     {
         Schema::create('conversations', function (Blueprint $table) {
             $table->id();
+            $table->foreignId('business_id')->constrained()->cascadeOnDelete();
+            $table->foreignId('customer_id')->constrained()->restrictOnDelete();
+            $table->unsignedBigInteger('whatsapp_connection_id');
+            $table->string('status')->default('open');
+            $table->timestamp('last_message_at')->nullable();
             $table->timestamps();
+
+            $table->index(['business_id', 'customer_id']);
+            $table->index(['business_id', 'status']);
         });
     }
 

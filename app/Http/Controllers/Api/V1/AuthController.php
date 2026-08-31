@@ -2,19 +2,23 @@
 
 namespace App\Http\Controllers\Api\V1;
 
-use App\Http\Controllers\Controller;
+use App\Http\Requests\Auth\ForgotPasswordRequest;
 use Illuminate\Http\Request;
-
 use App\Http\Requests\Auth\RegisterRequest;
 use App\Http\Requests\Auth\LoginRequest;
-use App\Models\User;
+use App\Http\Requests\Auth\ResetPasswordRequest;
 use App\Models\Business;
+use App\Models\User;
+use Illuminate\Auth\Events\PasswordReset;
+use Illuminate\Auth\Events\Registered;
+use Illuminate\Auth\Events\Verified;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Password;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 
-class AuthController extends Controller
+class AuthController extends ApiController
 {
     public function register(RegisterRequest $request)
     {
@@ -49,12 +53,12 @@ class AuthController extends Controller
             return $user;
         });
 
+        event(new Registered($user));
         $token = $user->createToken('auth_token')->plainTextToken;
 
-        return response()->json([
-            'message' => 'Successfully registered.',
-            'user' => $user,
-            'token' => $token
+        return $this->successResponse('Successfully registered.', [
+            'user' => $user->load('businesses'),
+            'token' => $token,
         ], 201);
     }
 
@@ -73,10 +77,9 @@ class AuthController extends Controller
         $deviceName = $validated['device_name'] ?? 'default_device';
         $token = $user->createToken($deviceName)->plainTextToken;
 
-        return response()->json([
-            'message' => 'Successfully logged in.',
-            'user' => $user,
-            'token' => $token
+        return $this->successResponse('Successfully logged in.', [
+            'user' => $user->load('businesses'),
+            'token' => $token,
         ]);
     }
 
@@ -84,16 +87,70 @@ class AuthController extends Controller
     {
         $request->user()->currentAccessToken()->delete();
 
-        return response()->json([
-            'message' => 'Successfully logged out.'
-        ]);
+        return $this->successResponse('Successfully logged out.');
     }
 
     public function user(Request $request)
     {
         $user = $request->user()->load('businesses');
-        return response()->json([
-            'user' => $user
-        ]);
+        return $this->successResponse('Authenticated user retrieved successfully.', $user);
+    }
+
+    public function forgotPassword(ForgotPasswordRequest $request)
+    {
+        Password::sendResetLink($request->only('email'));
+
+        // Do not disclose whether the email is registered.
+        return $this->successResponse('If the email address exists, a password reset link has been sent.');
+    }
+
+    public function resetPassword(ResetPasswordRequest $request)
+    {
+        $status = Password::reset($request->validated(), function (User $user, string $password) {
+            $user->forceFill([
+                'password' => Hash::make($password),
+                'remember_token' => Str::random(60),
+            ])->save();
+
+            $user->tokens()->delete();
+            event(new PasswordReset($user));
+        });
+
+        if ($status !== Password::PASSWORD_RESET) {
+            throw ValidationException::withMessages([
+                'email' => [__($status)],
+            ]);
+        }
+
+        return $this->successResponse('Password reset successfully. Please log in again.');
+    }
+
+    public function verifyEmail(Request $request, int $id, string $hash)
+    {
+        $user = $request->user();
+
+        if (!$user || $user->id !== $id || !hash_equals(sha1($user->getEmailForVerification()), $hash)) {
+            return $this->errorResponse('You do not have permission to perform this action.', 403);
+        }
+
+        if (!$user->hasVerifiedEmail()) {
+            $user->markEmailAsVerified();
+            event(new Verified($user));
+        }
+
+        return $this->successResponse('Email verified successfully.');
+    }
+
+    public function resendVerification(Request $request)
+    {
+        $user = $request->user();
+
+        if ($user->hasVerifiedEmail()) {
+            return $this->successResponse('Email is already verified.');
+        }
+
+        $user->sendEmailVerificationNotification();
+
+        return $this->successResponse('Verification email sent.');
     }
 }

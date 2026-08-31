@@ -25,7 +25,7 @@ class LoginTest extends TestCase
         ]);
 
         $response->assertStatus(200);
-        $response->assertJsonStructure(['message', 'user', 'token']);
+        $response->assertJsonStructure(['success', 'message', 'data' => ['user', 'token']]);
     }
 
     public function test_user_cannot_login_with_incorrect_password()

@@ -16,26 +16,37 @@ class SetTenantContext
      */
     public function handle(Request $request, Closure $next): Response
     {
-        if ($user = $request->user()) {
-            $requestedBusinessId = $request->header('X-Business-Id');
-            $businesses = $user->businesses;
+        $user = $request->user();
+        $businesses = $user?->businesses()->wherePivot('status', 'active')->get();
 
-            if ($businesses->isEmpty()) {
-                return response()->json(['message' => 'No business access found.'], 403);
-            }
-
-            if ($requestedBusinessId) {
-                if (!$businesses->contains('id', $requestedBusinessId)) {
-                    return response()->json(['message' => 'Unauthorized for this business.'], 403);
-                }
-                $businessId = $requestedBusinessId;
-            } else {
-                $businessId = $businesses->first()->id;
-            }
-
-            app(TenantContext::class)->set($businessId);
+        if (!$user || $businesses->isEmpty()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No active business access found.',
+            ], 403);
         }
 
-        return $next($request);
+        // A header may select an already-authorized membership. It never grants
+        // access and request payload/query business_id values are ignored.
+        $requestedBusinessId = $request->header('X-Business-ID');
+        $business = $requestedBusinessId
+            ? $businesses->firstWhere('id', (int) $requestedBusinessId)
+            : $businesses->first();
+
+        if (!$business) {
+            return response()->json([
+                'success' => false,
+                'message' => 'You do not have permission to access this business.',
+            ], 403);
+        }
+
+        $context = app(TenantContext::class);
+        $context->set($business->id);
+
+        try {
+            return $next($request);
+        } finally {
+            $context->clear();
+        }
     }
 }
