@@ -42,6 +42,7 @@ Route::prefix('v1')->group(function () {
             ->parameters(['customer-groups' => 'customerGroup']);
         Route::apiResource('products', ProductController::class);
         Route::apiResource('invoices', InvoiceController::class);
+        Route::get('invoices/{invoice}/pdf', [InvoiceController::class, 'pdf']);
         Route::apiResource('payments', PaymentController::class)->only(['index', 'store', 'show']);
         Route::get('reports/debt', [DebtReportController::class, 'index']);
     });

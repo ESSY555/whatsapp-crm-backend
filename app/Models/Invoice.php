@@ -27,6 +27,7 @@ class Invoice extends Model
     }
 
     public function customer(): BelongsTo { return $this->belongsTo(Customer::class); }
+    public function business(): BelongsTo { return $this->belongsTo(Business::class); }
     public function items(): HasMany { return $this->hasMany(InvoiceItem::class); }
     public function payments(): HasMany { return $this->hasMany(Payment::class); }
     public function creator(): BelongsTo { return $this->belongsTo(User::class, 'created_by'); }

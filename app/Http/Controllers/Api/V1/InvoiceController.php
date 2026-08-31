@@ -42,5 +42,11 @@ class InvoiceController extends ApiController
         return $this->successResponse('Invoice cancelled successfully.');
     }
 
+    public function pdf(int $invoice, InvoiceService $service)
+    {
+        $invoice = $this->invoice($invoice);
+        return $service->generatePdf($invoice);
+    }
+
     private function invoice(int $id): Invoice { return Invoice::query()->findOrFail($id); }
 }

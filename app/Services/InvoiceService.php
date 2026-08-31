@@ -2,15 +2,21 @@
 
 namespace App\Services;
 
+use App\Jobs\GenerateInvoicePdf;
 use App\Models\Customer;
 use App\Models\Invoice;
 use App\Models\Product;
 use App\Tenancy\TenantManager;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class InvoiceService
 {
+    public function __construct(
+        private InvoicePdfService $pdfService
+    ) {}
+
     public function create(array $data, int $userId): Invoice
     {
         return DB::transaction(function () use ($data, $userId) {
@@ -47,6 +53,32 @@ class InvoiceService
             }
             return $this->recalculate($invoice->refresh()->load('items', 'customer'));
         });
+    }
+
+    /**
+     * Generate and download invoice PDF
+     */
+    public function generatePdf(Invoice $invoice): StreamedResponse
+    {
+        $fileName = sprintf('invoice_%s.pdf', $invoice->invoice_number);
+
+        $pdfContent = $this->pdfService->generate($invoice);
+
+        return response()->streamDownload(
+            function () use ($pdfContent) {
+                echo $pdfContent;
+            },
+            $fileName,
+            ['Content-Type' => 'application/pdf']
+        );
+    }
+
+    /**
+     * Queue PDF generation for async processing
+     */
+    public function queuePdfGeneration(Invoice $invoice): void
+    {
+        dispatch(new GenerateInvoicePdf($invoice));
     }
 
     private function replaceItems(Invoice $invoice, array $items): void
@@ -102,3 +134,4 @@ class InvoiceService
         return $prefix . str_pad((string) $sequence, 6, '0', STR_PAD_LEFT);
     }
 }
+
