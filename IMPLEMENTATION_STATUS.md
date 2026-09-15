@@ -1,6 +1,6 @@
 # FlowCRM backend — PRD implementation status
 
-Maps every section of `PRD.md` to what exists in this repository. All items below are implemented and covered by the automated test suite (`php artisan test`, 77 tests / 472 assertions) unless marked otherwise.
+Maps every section of `PRD.md` to what exists in this repository. All items below are implemented and covered by the automated test suite (`php artisan test`, 81 tests / 513 assertions) unless marked otherwise.
 
 ## Architecture & tenancy (PRD §2–7, §33–36, §55–57)
 
@@ -19,7 +19,7 @@ Maps every section of `PRD.md` to what exists in this repository. All items belo
 | PRD section | Endpoints / code |
 | --- | --- |
 | §8–10 Businesses, users, settings | `BusinessController` (profile, logo upload, key/value settings), `UserController` (team list, invite, role change, remove) |
-| §11–12 Customers & groups | `CustomerController` (+ balances, search on name/business/phone/email, group filter), `CustomerGroupController`, `CustomerService` |
+| §11–12 Customers & groups | `CustomerController` (+ balances, search on name/business/phone/email, group filter, CSV bulk import with per-row report and template download via `CustomerImportService`), `CustomerGroupController`, `CustomerService` |
 | §13 Products | `ProductController` (unique SKU per business, soft deletes) |
 | §14–16 Invoices, items, statuses | `InvoiceController`, `InvoiceService` (server-side totals, auto numbering, draft/sent editing only, status derived from payments + due date, cancel instead of delete, `send`, `remind`) |
 | §17–18 Payments & debt | `PaymentController`, `PaymentService` (row lock, balance check, unique reference, `Idempotency-Key`, immutable rows + reversal entries) |

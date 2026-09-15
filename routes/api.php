@@ -59,6 +59,8 @@ Route::prefix('v1')->group(function () {
         });
 
         // CRM
+        Route::get('customers/import/template', [CustomerController::class, 'importTemplate']);
+        Route::post('customers/import', [CustomerController::class, 'import'])->middleware('throttle:10,1');
         Route::apiResource('customers', CustomerController::class);
         Route::apiResource('customer-groups', CustomerGroupController::class)
             ->parameters(['customer-groups' => 'customerGroup']);

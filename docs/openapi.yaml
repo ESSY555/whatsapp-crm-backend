@@ -187,6 +187,47 @@ paths:
       summary: Create a customer
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/CustomerInput" } } } }
       responses: { "201": { $ref: "#/components/responses/Success" }, "422": { $ref: "#/components/responses/Validation" } }
+  /customers/import:
+    post:
+      tags: [Customers]
+      summary: Bulk import customers from a CSV upload (rate limit 10/min, ≤ 2 MB, ≤ 2000 rows)
+      description: |
+        Multipart form. The first row must be a header; recognised columns are `name` (required), `business_name`/`company`,
+        `phone`, `email`, `address`, `city`, `category`, `notes`, `status` and `groups` (several separated by `;`).
+        Rows are validated individually — the response reports how many were imported, updated, skipped or rejected and why.
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: { type: string, format: binary }
+                duplicates: { type: string, enum: [skip, update], default: skip, description: what to do when a row matches an existing customer by phone or email }
+                create_groups: { type: boolean, default: true, description: create groups named in the file when they do not exist }
+                group_ids: { type: array, items: { type: integer }, description: groups every imported customer is added to }
+      responses:
+        "200":
+          description: Import summary
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          total: { type: integer }
+                          imported: { type: integer }
+                          updated: { type: integer }
+                          skipped: { type: integer }
+                          failed: { type: integer }
+                          errors: { type: array, items: { type: object, properties: { row: { type: integer }, message: { type: string } } } }
+        "422": { $ref: "#/components/responses/Validation" }
+  /customers/import/template:
+    get: { tags: [Customers], summary: Download a CSV template with the accepted columns, responses: { "200": { description: CSV file, content: { text/csv: { schema: { type: string } } } } } }
   /customers/{customer}:
     parameters: [{ $ref: "#/components/parameters/id" }]
     get: { tags: [Customers], summary: Customer with groups, invoices, payments and stats, responses: { "200": { $ref: "#/components/responses/Success" }, "404": { $ref: "#/components/responses/NotFound" } } }

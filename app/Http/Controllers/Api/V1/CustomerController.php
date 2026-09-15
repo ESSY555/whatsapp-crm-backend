@@ -2,11 +2,13 @@
 
 namespace App\Http\Controllers\Api\V1;
 
+use App\Http\Requests\Customer\ImportCustomersRequest;
 use App\Http\Requests\Customer\StoreCustomerRequest;
 use App\Http\Requests\Customer\UpdateCustomerRequest;
 use App\Models\Customer;
 use App\Models\Invoice;
 use App\Services\AuditLogger;
+use App\Services\CustomerImportService;
 use App\Services\CustomerService;
 use Illuminate\Http\Request;
 
@@ -47,6 +49,37 @@ class CustomerController extends ApiController
         $this->audit->log('customer.created', $customer, null, null, $customer->only('name', 'phone', 'email', 'business_name'));
 
         return $this->successResponse('Customer created successfully.', $customer, 201);
+    }
+
+    /**
+     * Bulk import from a CSV upload. Rows are validated individually and the
+     * response lists what was imported, updated, skipped or rejected.
+     */
+    public function import(ImportCustomersRequest $request, CustomerImportService $importer)
+    {
+        $summary = $importer->import($request->file('file')->get(), [
+            'duplicates' => $request->input('duplicates', 'skip'),
+            'create_groups' => $request->boolean('create_groups', true),
+            'group_ids' => $request->input('group_ids', []),
+        ]);
+
+        $this->audit->log('customer.imported', 'Customer', null, null, array_diff_key($summary, ['errors' => true]));
+
+        return $this->successResponse(
+            sprintf('%d customer(s) imported, %d updated, %d skipped, %d failed.', $summary['imported'], $summary['updated'], $summary['skipped'], $summary['failed']),
+            $summary,
+        );
+    }
+
+    /**
+     * Blank CSV with the accepted columns and one example row.
+     */
+    public function importTemplate(CustomerImportService $importer)
+    {
+        return response($importer->template(), 200, [
+            'Content-Type' => 'text/csv; charset=UTF-8',
+            'Content-Disposition' => 'attachment; filename="flowcrm-customers-template.csv"',
+        ]);
     }
 
     public function show(int $customer)
