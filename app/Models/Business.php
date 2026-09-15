@@ -3,10 +3,9 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
-
-use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\SoftDeletes;
 
 class Business extends Model
 {
@@ -15,7 +14,7 @@ class Business extends Model
     protected $fillable = [
         'name', 'slug', 'logo', 'email', 'phone', 'address',
         'city', 'state', 'country', 'currency', 'timezone',
-        'tax_number', 'status'
+        'tax_number', 'status',
     ];
 
     public function users(): BelongsToMany
@@ -28,5 +27,25 @@ class Business extends Model
     public function settings(): HasMany
     {
         return $this->hasMany(BusinessSetting::class);
+    }
+
+    public function whatsappConnections(): HasMany
+    {
+        return $this->hasMany(WhatsAppConnection::class);
+    }
+
+    public function customers(): HasMany
+    {
+        return $this->hasMany(Customer::class);
+    }
+
+    public function invoices(): HasMany
+    {
+        return $this->hasMany(Invoice::class);
+    }
+
+    public function setting(string $key, mixed $default = null): mixed
+    {
+        return $this->settings->firstWhere('key', $key)?->value ?? $default;
     }
 }

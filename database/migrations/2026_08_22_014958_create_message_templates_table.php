@@ -13,7 +13,19 @@ return new class extends Migration
     {
         Schema::create('message_templates', function (Blueprint $table) {
             $table->id();
+            $table->foreignId('business_id')->constrained()->cascadeOnDelete();
+            $table->string('name');
+            $table->string('category')->nullable();
+            $table->string('language')->default('en');
+            $table->longText('content');
+            $table->string('whatsapp_template_id')->nullable();
+            $table->enum('status', ['draft', 'pending', 'approved', 'rejected', 'disabled'])->default('draft');
+            $table->json('variables')->nullable();
             $table->timestamps();
+
+            $table->index(['business_id', 'status']);
+            $table->index(['business_id', 'category']);
+            $table->unique(['business_id', 'name']);
         });
     }
 

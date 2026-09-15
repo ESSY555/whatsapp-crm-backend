@@ -1,0 +1,585 @@
+openapi: 3.0.3
+info:
+  title: FlowCRM API
+  version: "1.0"
+  description: |
+    Multi-tenant REST API for FlowCRM (customers, invoices, payments, WhatsApp messaging,
+    broadcasts, automated reminders, reports, notifications and audit logs).
+
+    **Authentication** – Bearer token issued by `POST /auth/login` or `POST /auth/register`
+    (Laravel Sanctum). Every endpoint outside `/auth/*`, `/webhooks/*` and `/docs` requires it.
+
+    **Tenancy** – the business is resolved from the authenticated user's membership. A
+    `business_id` supplied in a body, query or header is ignored; users that belong to
+    several businesses may pick one of *their own* memberships with the `X-Business-ID`
+    header. Records of another business return `404`.
+
+    **Roles** – `owner` and `manager`. Owner-only endpoints are marked with `x-roles`.
+
+    **Response envelope** – every JSON response has the shape
+    `{ "success": boolean, "message": string, "data": ... }`. Validation failures return
+    `422` with `errors: { field: [messages] }`, `401` unauthenticated, `403` forbidden,
+    `404` not found, `429` rate limited.
+
+    **Pagination** – list endpoints return a Laravel paginator inside `data`:
+    `{ data: [...], current_page, last_page, per_page, total, ... }`. Use `page` and
+    `per_page` (max 100) query parameters.
+servers:
+  - url: /api/v1
+tags:
+  - { name: Auth }
+  - { name: Business }
+  - { name: Team }
+  - { name: Customers }
+  - { name: Products }
+  - { name: Invoices }
+  - { name: Payments }
+  - { name: WhatsApp }
+  - { name: Broadcasts }
+  - { name: Scheduled messages }
+  - { name: Reminders }
+  - { name: Reports }
+  - { name: Notifications }
+  - { name: Audit }
+  - { name: Webhooks }
+
+security:
+  - bearerAuth: []
+
+paths:
+  # ------------------------------------------------------------------ Auth
+  /auth/register:
+    post:
+      tags: [Auth]
+      security: []
+      summary: Register a business and its owner (rate limit 5/min)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, email, password, password_confirmation, business_name]
+              properties:
+                name: { type: string, maxLength: 255 }
+                email: { type: string, format: email }
+                phone: { type: string }
+                password: { type: string, minLength: 8 }
+                password_confirmation: { type: string }
+                business_name: { type: string }
+                business_phone: { type: string }
+                business_email: { type: string, format: email }
+                currency: { type: string, minLength: 3, maxLength: 3, example: NGN }
+                country: { type: string }
+                timezone: { type: string, example: Africa/Lagos }
+                industry: { type: string }
+      responses:
+        "201": { description: Registered, content: { application/json: { schema: { $ref: "#/components/schemas/AuthResponse" } } } }
+        "422": { $ref: "#/components/responses/Validation" }
+  /auth/login:
+    post:
+      tags: [Auth]
+      security: []
+      summary: Log in and obtain a token (rate limit 5/min)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string }
+                device_name: { type: string }
+      responses:
+        "200": { description: Logged in, content: { application/json: { schema: { $ref: "#/components/schemas/AuthResponse" } } } }
+        "422": { $ref: "#/components/responses/Validation" }
+  /auth/logout:
+    post: { tags: [Auth], summary: Revoke the current token, responses: { "200": { $ref: "#/components/responses/Success" } } }
+  /auth/user:
+    get: { tags: [Auth], summary: Current user with memberships, responses: { "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Envelope" } } } } } }
+  /auth/forgot-password:
+    post:
+      tags: [Auth]
+      security: []
+      summary: Send a password reset link (always 200)
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [email], properties: { email: { type: string } } } } } }
+      responses: { "200": { $ref: "#/components/responses/Success" } }
+  /auth/reset-password:
+    post:
+      tags: [Auth]
+      security: []
+      summary: Reset password with the emailed token
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [token, email, password, password_confirmation], properties: { token: { type: string }, email: { type: string }, password: { type: string }, password_confirmation: { type: string } } } } } }
+      responses: { "200": { $ref: "#/components/responses/Success" }, "422": { $ref: "#/components/responses/Validation" } }
+  /auth/email/verify/{id}/{hash}:
+    get:
+      tags: [Auth]
+      summary: Verify email (signed URL from the verification email)
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }, { name: hash, in: path, required: true, schema: { type: string } }]
+      responses: { "200": { $ref: "#/components/responses/Success" }, "403": { $ref: "#/components/responses/Forbidden" } }
+  /auth/email/verification-notification:
+    post: { tags: [Auth], summary: Resend the verification email, responses: { "200": { $ref: "#/components/responses/Success" } } }
+
+  # -------------------------------------------------------------- Business
+  /business:
+    get: { tags: [Business], summary: Current business profile, settings, role and WhatsApp status, responses: { "200": { $ref: "#/components/responses/Success" } } }
+    put:
+      tags: [Business]
+      x-roles: [owner, manager]
+      summary: Update business profile
+      requestBody: { content: { application/json: { schema: { $ref: "#/components/schemas/BusinessInput" } } } }
+      responses: { "200": { $ref: "#/components/responses/Success" }, "403": { $ref: "#/components/responses/Forbidden" }, "422": { $ref: "#/components/responses/Validation" } }
+  /business/logo:
+    post:
+      tags: [Business]
+      x-roles: [owner, manager]
+      summary: Upload the business logo (multipart, png/jpg/webp/svg ≤ 2 MB)
+      requestBody: { content: { multipart/form-data: { schema: { type: object, properties: { logo: { type: string, format: binary } } } } } }
+      responses: { "200": { $ref: "#/components/responses/Success" } }
+  /business/settings:
+    get: { tags: [Business], summary: Key/value settings, responses: { "200": { $ref: "#/components/responses/Success" } } }
+    put:
+      tags: [Business]
+      x-roles: [owner, manager]
+      summary: Upsert settings
+      requestBody: { content: { application/json: { schema: { type: object, properties: { settings: { type: object, additionalProperties: { type: string }, example: { invoice_prefix: "INV-", payment_terms_days: "14", invoice_footer: "Thank you", reminders_enabled: "true" } } } } } } }
+      responses: { "200": { $ref: "#/components/responses/Success" } }
+
+  # ------------------------------------------------------------------ Team
+  /users:
+    get: { tags: [Team], summary: Members of the business, responses: { "200": { $ref: "#/components/responses/Success" } } }
+  /users/invite:
+    post:
+      tags: [Team]
+      x-roles: [owner]
+      summary: Invite a member (new accounts get a password-setup email)
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [name, email, role], properties: { name: { type: string }, email: { type: string }, phone: { type: string }, role: { type: string, enum: [owner, manager] } } } } } }
+      responses: { "201": { $ref: "#/components/responses/Success" }, "403": { $ref: "#/components/responses/Forbidden" }, "422": { $ref: "#/components/responses/Validation" } }
+  /users/{user}/role:
+    put:
+      tags: [Team]
+      x-roles: [owner]
+      summary: Change a member's role (a business keeps at least one owner)
+      parameters: [{ $ref: "#/components/parameters/id" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, properties: { role: { type: string, enum: [owner, manager] } } } } } }
+      responses: { "200": { $ref: "#/components/responses/Success" }, "422": { $ref: "#/components/responses/Validation" } }
+  /users/{user}:
+    delete: { tags: [Team], x-roles: [owner], summary: Remove a member, parameters: [{ $ref: "#/components/parameters/id" }], responses: { "200": { $ref: "#/components/responses/Success" } } }
+
+  # ------------------------------------------------------------- Customers
+  /customers:
+    get:
+      tags: [Customers]
+      summary: List customers with balances (paginated)
+      parameters:
+        - { name: search, in: query, schema: { type: string }, description: name, business name, phone or email }
+        - { name: status, in: query, schema: { type: string, enum: [active, inactive] } }
+        - { name: category, in: query, schema: { type: string } }
+        - { name: group_id, in: query, schema: { type: integer } }
+        - { name: with_balance, in: query, schema: { type: boolean }, description: only customers with open invoices }
+        - { $ref: "#/components/parameters/page" }
+        - { $ref: "#/components/parameters/perPage" }
+      responses: { "200": { $ref: "#/components/responses/Paginated" } }
+    post:
+      tags: [Customers]
+      summary: Create a customer
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/CustomerInput" } } } }
+      responses: { "201": { $ref: "#/components/responses/Success" }, "422": { $ref: "#/components/responses/Validation" } }
+  /customers/{customer}:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get: { tags: [Customers], summary: Customer with groups, invoices, payments and stats, responses: { "200": { $ref: "#/components/responses/Success" }, "404": { $ref: "#/components/responses/NotFound" } } }
+    put:
+      tags: [Customers]
+      summary: Update a customer
+      requestBody: { content: { application/json: { schema: { $ref: "#/components/schemas/CustomerInput" } } } }
+      responses: { "200": { $ref: "#/components/responses/Success" } }
+    delete: { tags: [Customers], summary: Soft-delete a customer (refused while unpaid invoices exist), responses: { "200": { $ref: "#/components/responses/Success" }, "422": { $ref: "#/components/responses/Validation" } } }
+  /customer-groups:
+    get: { tags: [Customers], summary: List groups with member counts, parameters: [{ name: search, in: query, schema: { type: string } }, { $ref: "#/components/parameters/perPage" }], responses: { "200": { $ref: "#/components/responses/Paginated" } } }
+    post:
+      tags: [Customers]
+      summary: Create a group
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [name], properties: { name: { type: string }, description: { type: string } } } } } }
+      responses: { "201": { $ref: "#/components/responses/Success" } }
+  /customer-groups/{customerGroup}:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get: { tags: [Customers], summary: Group with customers, responses: { "200": { $ref: "#/components/responses/Success" } } }
+    put: { tags: [Customers], summary: Update a group, responses: { "200": { $ref: "#/components/responses/Success" } } }
+    delete: { tags: [Customers], summary: Delete a group, responses: { "200": { $ref: "#/components/responses/Success" } } }
+
+  # -------------------------------------------------------------- Products
+  /products:
+    get: { tags: [Products], summary: List products, parameters: [{ name: search, in: query, schema: { type: string } }, { name: status, in: query, schema: { type: string } }, { $ref: "#/components/parameters/perPage" }], responses: { "200": { $ref: "#/components/responses/Paginated" } } }
+    post:
+      tags: [Products]
+      summary: Create a product (SKU unique per business)
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ProductInput" } } } }
+      responses: { "201": { $ref: "#/components/responses/Success" } }
+  /products/{product}:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get: { tags: [Products], summary: Product, responses: { "200": { $ref: "#/components/responses/Success" } } }
+    put: { tags: [Products], summary: Update product, requestBody: { content: { application/json: { schema: { $ref: "#/components/schemas/ProductInput" } } } }, responses: { "200": { $ref: "#/components/responses/Success" } } }
+    delete: { tags: [Products], summary: Soft-delete product, responses: { "200": { $ref: "#/components/responses/Success" } } }
+
+  # -------------------------------------------------------------- Invoices
+  /invoices:
+    get:
+      tags: [Invoices]
+      summary: List invoices (paginated)
+      parameters:
+        - { name: status, in: query, schema: { type: string, enum: [draft, sent, paid, partially_paid, overdue, cancelled] } }
+        - { name: customer_id, in: query, schema: { type: integer } }
+        - { name: search, in: query, schema: { type: string }, description: invoice number or customer }
+        - { name: from_date, in: query, schema: { type: string, format: date } }
+        - { name: to_date, in: query, schema: { type: string, format: date } }
+        - { name: open, in: query, schema: { type: boolean }, description: only invoices with a balance }
+        - { $ref: "#/components/parameters/page" }
+        - { $ref: "#/components/parameters/perPage" }
+      responses: { "200": { $ref: "#/components/responses/Paginated" } }
+    post:
+      tags: [Invoices]
+      summary: Create an invoice (totals are computed server-side)
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/InvoiceInput" } } } }
+      responses: { "201": { $ref: "#/components/responses/Success" }, "422": { $ref: "#/components/responses/Validation" } }
+  /invoices/{invoice}:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get: { tags: [Invoices], summary: Invoice with items, customer, payments and reminder history, responses: { "200": { $ref: "#/components/responses/Success" } } }
+    put: { tags: [Invoices], summary: Update a draft/sent invoice, requestBody: { content: { application/json: { schema: { $ref: "#/components/schemas/InvoiceInput" } } } }, responses: { "200": { $ref: "#/components/responses/Success" }, "422": { $ref: "#/components/responses/Validation" } } }
+    delete: { tags: [Invoices], summary: Cancel an invoice (never deleted; refused once paid), responses: { "200": { $ref: "#/components/responses/Success" }, "422": { $ref: "#/components/responses/Validation" } } }
+  /invoices/{invoice}/pdf:
+    get: { tags: [Invoices], summary: Download the invoice PDF, parameters: [{ $ref: "#/components/parameters/id" }], responses: { "200": { description: PDF, content: { application/pdf: { schema: { type: string, format: binary } } } } } }
+  /invoices/{invoice}/send:
+    post:
+      tags: [Invoices]
+      summary: Mark as sent and optionally deliver on WhatsApp (rate limit 60/min)
+      parameters: [{ $ref: "#/components/parameters/id" }]
+      requestBody: { content: { application/json: { schema: { type: object, properties: { via_whatsapp: { type: boolean, default: true }, message: { type: string }, template_id: { type: integer } } } } } }
+      responses: { "200": { description: "data.invoice and data.message (null when not sent on WhatsApp)", content: { application/json: { schema: { $ref: "#/components/schemas/Envelope" } } } } }
+  /invoices/{invoice}/remind:
+    post:
+      tags: [Invoices]
+      summary: Queue a manual payment reminder on WhatsApp
+      parameters: [{ $ref: "#/components/parameters/id" }]
+      requestBody: { content: { application/json: { schema: { type: object, properties: { message: { type: string }, template_id: { type: integer } } } } } }
+      responses: { "201": { $ref: "#/components/responses/Success" }, "422": { $ref: "#/components/responses/Validation" } }
+
+  # -------------------------------------------------------------- Payments
+  /payments:
+    get:
+      tags: [Payments]
+      summary: List payments (paginated)
+      parameters:
+        - { name: invoice_id, in: query, schema: { type: integer } }
+        - { name: customer_id, in: query, schema: { type: integer } }
+        - { name: payment_method, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { type: string, enum: [completed, reversed, reversal] } }
+        - { name: from_date, in: query, schema: { type: string, format: date } }
+        - { name: to_date, in: query, schema: { type: string, format: date } }
+        - { $ref: "#/components/parameters/perPage" }
+      responses: { "200": { $ref: "#/components/responses/Paginated" } }
+    post:
+      tags: [Payments]
+      summary: Record a payment (locks the invoice; supports Idempotency-Key header)
+      parameters: [{ name: Idempotency-Key, in: header, schema: { type: string }, description: repeated requests with the same key return the original payment }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/PaymentInput" } } } }
+      responses: { "201": { $ref: "#/components/responses/Success" }, "200": { description: Existing payment for the idempotency key }, "422": { $ref: "#/components/responses/Validation" } }
+  /payments/{payment}:
+    get: { tags: [Payments], summary: Payment, parameters: [{ $ref: "#/components/parameters/id" }], responses: { "200": { $ref: "#/components/responses/Success" } } }
+  /payments/{payment}/reverse:
+    post:
+      tags: [Payments]
+      x-roles: [owner]
+      summary: Reverse a payment by recording an offsetting entry
+      parameters: [{ $ref: "#/components/parameters/id" }]
+      requestBody: { content: { application/json: { schema: { type: object, properties: { reason: { type: string } } } } } }
+      responses: { "201": { $ref: "#/components/responses/Success" }, "422": { $ref: "#/components/responses/Validation" } }
+
+  # -------------------------------------------------------------- WhatsApp
+  /whatsapp/connections:
+    get: { tags: [WhatsApp], x-roles: [owner, manager], summary: Connections (tokens are never returned), responses: { "200": { $ref: "#/components/responses/Success" } } }
+    post:
+      tags: [WhatsApp]
+      x-roles: [owner, manager]
+      summary: Save Cloud API credentials (encrypted at rest)
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [phone_number_id, access_token], properties: { phone_number_id: { type: string }, business_account_id: { type: string }, access_token: { type: string } } } } } }
+      responses: { "201": { $ref: "#/components/responses/Success" } }
+  /whatsapp/connections/{connection}:
+    delete: { tags: [WhatsApp], x-roles: [owner, manager], summary: Disconnect, parameters: [{ $ref: "#/components/parameters/id" }], responses: { "200": { $ref: "#/components/responses/Success" } } }
+  /whatsapp/connections/{connection}/verify:
+    post: { tags: [WhatsApp], x-roles: [owner, manager], summary: Verify credentials against the Cloud API, parameters: [{ $ref: "#/components/parameters/id" }], responses: { "200": { $ref: "#/components/responses/Success" }, "422": { $ref: "#/components/responses/Validation" } } }
+  /templates:
+    get:
+      tags: [WhatsApp]
+      summary: List message templates (alias of /whatsapp/templates)
+      parameters: [{ name: status, in: query, schema: { type: string } }, { name: category, in: query, schema: { type: string } }, { name: search, in: query, schema: { type: string } }, { $ref: "#/components/parameters/perPage" }]
+      responses: { "200": { $ref: "#/components/responses/Paginated" } }
+    post:
+      tags: [WhatsApp]
+      summary: Create a template (`{{placeholders}}` are rendered at send time)
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/TemplateInput" } } } }
+      responses: { "201": { $ref: "#/components/responses/Success" } }
+  /templates/{template}:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get: { tags: [WhatsApp], summary: Template, responses: { "200": { $ref: "#/components/responses/Success" } } }
+    put: { tags: [WhatsApp], summary: Update template, requestBody: { content: { application/json: { schema: { $ref: "#/components/schemas/TemplateInput" } } } }, responses: { "200": { $ref: "#/components/responses/Success" } } }
+    delete: { tags: [WhatsApp], summary: Delete template (refused when used by a reminder rule), responses: { "200": { $ref: "#/components/responses/Success" }, "422": { $ref: "#/components/responses/Validation" } } }
+  /conversations:
+    get:
+      tags: [WhatsApp]
+      summary: Conversations with last message and unread count
+      parameters: [{ name: status, in: query, schema: { type: string, enum: [open, closed, archived] } }, { name: customer_id, in: query, schema: { type: integer } }, { name: search, in: query, schema: { type: string } }, { $ref: "#/components/parameters/perPage" }]
+      responses: { "200": { $ref: "#/components/responses/Paginated" } }
+    post:
+      tags: [WhatsApp]
+      summary: Open (or fetch) the conversation with a customer
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [customer_id], properties: { customer_id: { type: integer } } } } } }
+      responses: { "201": { $ref: "#/components/responses/Success" }, "200": { description: Existing conversation }, "422": { $ref: "#/components/responses/Validation" } }
+  /conversations/{conversation}:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get: { tags: [WhatsApp], summary: Conversation with latest 50 messages (marks inbound as read), responses: { "200": { $ref: "#/components/responses/Success" } } }
+    put: { tags: [WhatsApp], summary: Change status, requestBody: { content: { application/json: { schema: { type: object, properties: { status: { type: string, enum: [open, closed, archived] } } } } } }, responses: { "200": { $ref: "#/components/responses/Success" } } }
+  /conversations/{conversation}/messages:
+    get: { tags: [WhatsApp], summary: Paginated messages of a conversation, parameters: [{ $ref: "#/components/parameters/id" }, { name: direction, in: query, schema: { type: string } }, { name: status, in: query, schema: { type: string } }, { $ref: "#/components/parameters/perPage" }], responses: { "200": { $ref: "#/components/responses/Paginated" } } }
+  /messages:
+    get:
+      tags: [WhatsApp]
+      summary: Search messages across the business
+      parameters:
+        - { name: conversation_id, in: query, schema: { type: integer } }
+        - { name: customer_id, in: query, schema: { type: integer } }
+        - { name: direction, in: query, schema: { type: string, enum: [inbound, outbound] } }
+        - { name: status, in: query, schema: { type: string, enum: [queued, sending, sent, delivered, read, failed] } }
+        - { name: from_date, in: query, schema: { type: string, format: date } }
+        - { name: to_date, in: query, schema: { type: string, format: date } }
+        - { name: search, in: query, schema: { type: string } }
+        - { $ref: "#/components/parameters/perPage" }
+      responses: { "200": { $ref: "#/components/responses/Paginated" } }
+    post:
+      tags: [WhatsApp]
+      summary: Queue an outbound message (rate limit 60/min)
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/SendMessageInput" } } } }
+      responses: { "201": { $ref: "#/components/responses/Success" }, "422": { $ref: "#/components/responses/Validation" } }
+  /messages/{message}:
+    get: { tags: [WhatsApp], summary: Message, parameters: [{ $ref: "#/components/parameters/id" }], responses: { "200": { $ref: "#/components/responses/Success" } } }
+  /messages/{message}/retry:
+    post: { tags: [WhatsApp], summary: Re-queue a failed message, parameters: [{ $ref: "#/components/parameters/id" }], responses: { "200": { $ref: "#/components/responses/Success" }, "422": { $ref: "#/components/responses/Validation" } } }
+
+  # ------------------------------------------------------------ Broadcasts
+  /broadcasts:
+    get: { tags: [Broadcasts], summary: List broadcasts, parameters: [{ name: status, in: query, schema: { type: string } }, { name: search, in: query, schema: { type: string } }, { $ref: "#/components/parameters/perPage" }], responses: { "200": { $ref: "#/components/responses/Paginated" } } }
+    post:
+      tags: [Broadcasts]
+      summary: Create a broadcast with recipients; optionally send now or schedule (rate limit 10/min)
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/BroadcastInput" } } } }
+      responses: { "201": { $ref: "#/components/responses/Success" }, "422": { $ref: "#/components/responses/Validation" } }
+  /broadcasts/{broadcast}:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get: { tags: [Broadcasts], summary: Broadcast with stats and paginated recipients, parameters: [{ name: status, in: query, schema: { type: string } }], responses: { "200": { $ref: "#/components/responses/Success" } } }
+    delete: { tags: [Broadcasts], summary: Delete a draft broadcast, responses: { "200": { $ref: "#/components/responses/Success" } } }
+  /broadcasts/{broadcast}/recipients:
+    post: { tags: [Broadcasts], summary: Add recipients to a draft, parameters: [{ $ref: "#/components/parameters/id" }], requestBody: { content: { application/json: { schema: { $ref: "#/components/schemas/RecipientsInput" } } } }, responses: { "200": { $ref: "#/components/responses/Success" } } }
+  /broadcasts/{broadcast}/schedule:
+    post: { tags: [Broadcasts], summary: Schedule for later, parameters: [{ $ref: "#/components/parameters/id" }], requestBody: { content: { application/json: { schema: { type: object, properties: { scheduled_at: { type: string, format: date-time } } } } } }, responses: { "200": { $ref: "#/components/responses/Success" } } }
+  /broadcasts/{broadcast}/start:
+    post: { tags: [Broadcasts], summary: Start sending (queued in batches), parameters: [{ $ref: "#/components/parameters/id" }], responses: { "200": { $ref: "#/components/responses/Success" } } }
+  /broadcasts/{broadcast}/pause:
+    post: { tags: [Broadcasts], summary: Pause a processing broadcast, parameters: [{ $ref: "#/components/parameters/id" }], responses: { "200": { $ref: "#/components/responses/Success" } } }
+  /broadcasts/{broadcast}/cancel:
+    post: { tags: [Broadcasts], summary: Cancel a draft/scheduled/paused broadcast, parameters: [{ $ref: "#/components/parameters/id" }], responses: { "200": { $ref: "#/components/responses/Success" } } }
+
+  # ---------------------------------------------------- Scheduled messages
+  /scheduled-messages:
+    get: { tags: [Scheduled messages], summary: List, parameters: [{ name: customer_id, in: query, schema: { type: integer } }, { name: status, in: query, schema: { type: string } }, { name: from_date, in: query, schema: { type: string } }, { name: to_date, in: query, schema: { type: string } }, { $ref: "#/components/parameters/perPage" }], responses: { "200": { $ref: "#/components/responses/Paginated" } } }
+    post:
+      tags: [Scheduled messages]
+      summary: Schedule a message for a customer
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [customer_id, scheduled_at], properties: { customer_id: { type: integer }, template_id: { type: integer }, content: { type: string }, scheduled_at: { type: string, format: date-time } } } } } }
+      responses: { "201": { $ref: "#/components/responses/Success" }, "422": { $ref: "#/components/responses/Validation" } }
+  /scheduled-messages/stats:
+    get: { tags: [Scheduled messages], summary: Counts per status, responses: { "200": { $ref: "#/components/responses/Success" } } }
+  /scheduled-messages/{scheduledMessage}:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get: { tags: [Scheduled messages], summary: Scheduled message, responses: { "200": { $ref: "#/components/responses/Success" } } }
+    put: { tags: [Scheduled messages], summary: Reschedule / edit a pending message, responses: { "200": { $ref: "#/components/responses/Success" } } }
+    delete: { tags: [Scheduled messages], summary: Delete a pending, cancelled or failed message, responses: { "200": { $ref: "#/components/responses/Success" } } }
+  /scheduled-messages/{scheduledMessage}/cancel:
+    post: { tags: [Scheduled messages], summary: Cancel a pending message, parameters: [{ $ref: "#/components/parameters/id" }], responses: { "200": { $ref: "#/components/responses/Success" } } }
+
+  # ------------------------------------------------------------- Reminders
+  /reminders:
+    get: { tags: [Reminders], summary: Reminder rules, parameters: [{ name: enabled, in: query, schema: { type: boolean } }, { name: search, in: query, schema: { type: string } }], responses: { "200": { $ref: "#/components/responses/Paginated" } } }
+    post:
+      tags: [Reminders]
+      summary: Create a rule
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ReminderRuleInput" } } } }
+      responses: { "201": { $ref: "#/components/responses/Success" }, "422": { $ref: "#/components/responses/Validation" } }
+  /reminders/{reminder}:
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get: { tags: [Reminders], summary: Rule, responses: { "200": { $ref: "#/components/responses/Success" } } }
+    put: { tags: [Reminders], summary: Update rule, requestBody: { content: { application/json: { schema: { $ref: "#/components/schemas/ReminderRuleInput" } } } }, responses: { "200": { $ref: "#/components/responses/Success" } } }
+    delete: { tags: [Reminders], summary: Delete rule, responses: { "200": { $ref: "#/components/responses/Success" } } }
+  /reminders/trigger-types:
+    get: { tags: [Reminders], summary: Available trigger types, responses: { "200": { $ref: "#/components/responses/Success" } } }
+  /reminders/preview:
+    get: { tags: [Reminders], summary: Invoices that would be reminded right now, responses: { "200": { $ref: "#/components/responses/Success" } } }
+  /reminders/run:
+    post: { tags: [Reminders], summary: Run the reminder engine now (rate limit 5/min), responses: { "200": { description: "{rules, sent, failed, skipped}" } } }
+  /reminders/logs:
+    get: { tags: [Reminders], summary: Reminder history, parameters: [{ name: invoice_id, in: query, schema: { type: integer } }, { name: status, in: query, schema: { type: string } }, { $ref: "#/components/parameters/perPage" }], responses: { "200": { $ref: "#/components/responses/Paginated" } } }
+
+  # --------------------------------------------------------------- Reports
+  /dashboard:
+    get: { tags: [Reports], summary: KPI metrics, 6-month revenue trend, ageing, recent invoices/payments/messages/activity, responses: { "200": { $ref: "#/components/responses/Success" } } }
+  /reports/sales:
+    get: { tags: [Reports], summary: Sales report, parameters: [{ $ref: "#/components/parameters/fromDate" }, { $ref: "#/components/parameters/toDate" }], responses: { "200": { $ref: "#/components/responses/Success" } } }
+  /reports/customers:
+    get: { tags: [Reports], summary: Customer report (new customers, groups, top customers), parameters: [{ $ref: "#/components/parameters/fromDate" }, { $ref: "#/components/parameters/toDate" }], responses: { "200": { $ref: "#/components/responses/Success" } } }
+  /reports/debt:
+    get: { tags: [Reports], summary: Debt & ageing report (current, 1–30, 31–60, 61–90, 90+), parameters: [{ name: customer_id, in: query, schema: { type: integer } }], responses: { "200": { $ref: "#/components/responses/Success" } } }
+  /reports/messaging:
+    get: { tags: [Reports], summary: Messaging report (sent/delivered/read/failed, templates, broadcasts), parameters: [{ $ref: "#/components/parameters/fromDate" }, { $ref: "#/components/parameters/toDate" }], responses: { "200": { $ref: "#/components/responses/Success" } } }
+  /search:
+    get: { tags: [Reports], summary: Quick search across customers and invoices, parameters: [{ name: q, in: query, required: true, schema: { type: string } }], responses: { "200": { $ref: "#/components/responses/Success" } } }
+
+  # --------------------------------------------------------- Notifications
+  /notifications:
+    get: { tags: [Notifications], summary: Notifications for the current user (meta.unread_count included), parameters: [{ name: unread, in: query, schema: { type: boolean } }, { name: type, in: query, schema: { type: string } }, { $ref: "#/components/parameters/perPage" }], responses: { "200": { $ref: "#/components/responses/Paginated" } } }
+  /notifications/unread-count:
+    get: { tags: [Notifications], summary: Unread count, responses: { "200": { $ref: "#/components/responses/Success" } } }
+  /notifications/read-all:
+    post: { tags: [Notifications], summary: Mark all as read, responses: { "200": { $ref: "#/components/responses/Success" } } }
+  /notifications/{notification}/read:
+    post: { tags: [Notifications], summary: Mark one as read, parameters: [{ $ref: "#/components/parameters/id" }], responses: { "200": { $ref: "#/components/responses/Success" } } }
+  /notifications/{notification}:
+    delete: { tags: [Notifications], summary: Delete, parameters: [{ $ref: "#/components/parameters/id" }], responses: { "200": { $ref: "#/components/responses/Success" } } }
+
+  # ----------------------------------------------------------------- Audit
+  /audit-logs:
+    get:
+      tags: [Audit]
+      x-roles: [owner, manager]
+      summary: Audit trail (paginated)
+      parameters: [{ name: action, in: query, schema: { type: string }, description: prefix match e.g. payment }, { name: entity_type, in: query, schema: { type: string } }, { name: entity_id, in: query, schema: { type: integer } }, { name: user_id, in: query, schema: { type: integer } }, { $ref: "#/components/parameters/fromDate" }, { $ref: "#/components/parameters/toDate" }, { $ref: "#/components/parameters/perPage" }]
+      responses: { "200": { $ref: "#/components/responses/Paginated" } }
+  /audit-logs/{auditLog}:
+    get: { tags: [Audit], x-roles: [owner, manager], summary: Audit entry, parameters: [{ $ref: "#/components/parameters/id" }], responses: { "200": { $ref: "#/components/responses/Success" } } }
+
+  # -------------------------------------------------------------- Webhooks
+  /webhooks/whatsapp:
+    get:
+      tags: [Webhooks]
+      security: []
+      summary: Meta subscription handshake (hub_mode, hub_verify_token, hub_challenge)
+      responses: { "200": { description: Echoes hub_challenge }, "403": { description: Bad verify token } }
+    post:
+      tags: [Webhooks]
+      security: []
+      summary: Receive messages and status updates (signature X-Hub-Signature-256 is validated when WHATSAPP_APP_SECRET is set; processing is queued)
+      responses: { "202": { description: Accepted }, "401": { description: Invalid signature } }
+  /docs:
+    get: { tags: [Reports], security: [], summary: This document, responses: { "200": { description: OpenAPI YAML } } }
+
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer }
+  parameters:
+    id: { name: id, in: path, required: true, schema: { type: integer } }
+    page: { name: page, in: query, schema: { type: integer, minimum: 1 } }
+    perPage: { name: per_page, in: query, schema: { type: integer, minimum: 1, maximum: 100 } }
+    fromDate: { name: from_date, in: query, schema: { type: string, format: date } }
+    toDate: { name: to_date, in: query, schema: { type: string, format: date } }
+  responses:
+    Success: { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Envelope" } } } }
+    Paginated: { description: Paginated list, content: { application/json: { schema: { $ref: "#/components/schemas/PaginatedEnvelope" } } } }
+    Validation: { description: Validation failed, content: { application/json: { schema: { $ref: "#/components/schemas/ValidationError" } } } }
+    Forbidden: { description: Forbidden, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+    NotFound: { description: Not found (also returned for another tenant's records), content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  schemas:
+    Envelope:
+      type: object
+      properties: { success: { type: boolean, example: true }, message: { type: string }, data: {} }
+    PaginatedEnvelope:
+      type: object
+      properties:
+        success: { type: boolean }
+        message: { type: string }
+        data:
+          type: object
+          properties: { data: { type: array, items: {} }, current_page: { type: integer }, last_page: { type: integer }, per_page: { type: integer }, total: { type: integer } }
+    Error:
+      type: object
+      properties: { success: { type: boolean, example: false }, message: { type: string } }
+    ValidationError:
+      type: object
+      properties: { success: { type: boolean, example: false }, message: { type: string, example: Validation failed. }, errors: { type: object, additionalProperties: { type: array, items: { type: string } } } }
+    AuthResponse:
+      type: object
+      properties:
+        success: { type: boolean }
+        message: { type: string }
+        data:
+          type: object
+          properties:
+            token: { type: string }
+            user:
+              type: object
+              properties:
+                id: { type: integer }
+                name: { type: string }
+                email: { type: string }
+                business: { type: object, description: default business membership with role }
+                businesses: { type: array, items: { type: object } }
+    BusinessInput:
+      type: object
+      properties: { name: { type: string }, email: { type: string }, phone: { type: string }, address: { type: string }, city: { type: string }, state: { type: string }, country: { type: string }, currency: { type: string }, timezone: { type: string }, tax_number: { type: string } }
+    CustomerInput:
+      type: object
+      required: [name]
+      properties: { name: { type: string }, business_name: { type: string }, phone: { type: string }, email: { type: string }, address: { type: string }, category: { type: string }, notes: { type: string }, status: { type: string, enum: [active, inactive] }, group_ids: { type: array, items: { type: integer } } }
+    ProductInput:
+      type: object
+      required: [name, unit_price]
+      properties: { name: { type: string }, sku: { type: string }, description: { type: string }, unit_price: { type: number }, tax_rate: { type: number }, status: { type: string } }
+    InvoiceInput:
+      type: object
+      required: [customer_id, items]
+      properties:
+        customer_id: { type: integer }
+        invoice_number: { type: string, description: auto-generated when omitted }
+        issue_date: { type: string, format: date }
+        due_date: { type: string, format: date }
+        discount: { type: number }
+        notes: { type: string }
+        status: { type: string, enum: [draft, sent] }
+        items:
+          type: array
+          items:
+            type: object
+            required: [quantity]
+            properties: { product_id: { type: integer, description: catalogue products supply price and tax }, description: { type: string }, quantity: { type: number }, unit_price: { type: number, description: required for custom lines }, tax_rate: { type: number } }
+    PaymentInput:
+      type: object
+      required: [invoice_id, amount, payment_method]
+      properties: { invoice_id: { type: integer }, amount: { type: number }, payment_method: { type: string, enum: [cash, bank_transfer, card, mobile_money, other] }, reference: { type: string, description: unique per business }, payment_date: { type: string, format: date }, notes: { type: string } }
+    TemplateInput:
+      type: object
+      required: [name, content]
+      properties: { name: { type: string }, category: { type: string }, language: { type: string, default: en }, content: { type: string }, whatsapp_template_id: { type: string, description: Meta template name for template messages }, variables: { type: object }, status: { type: string, enum: [draft, pending, approved, rejected, disabled] } }
+    SendMessageInput:
+      type: object
+      properties: { conversation_id: { type: integer }, customer_id: { type: integer, description: alternative to conversation_id }, body: { type: string }, template_id: { type: integer, description: approved template; body becomes optional }, template_variables: { type: object, additionalProperties: { type: string } } }
+    RecipientsInput:
+      type: object
+      properties: { customer_ids: { type: array, items: { type: integer } }, group_ids: { type: array, items: { type: integer } }, all_customers: { type: boolean } }
+    BroadcastInput:
+      allOf:
+        - $ref: "#/components/schemas/RecipientsInput"
+        - type: object
+          required: [name]
+          properties: { name: { type: string }, template_id: { type: integer }, content: { type: string, description: required without template_id }, scheduled_at: { type: string, format: date-time }, send_now: { type: boolean } }
+    ReminderRuleInput:
+      type: object
+      required: [name, template_id, trigger_type]
+      properties: { name: { type: string }, template_id: { type: integer }, trigger_type: { type: string, enum: [before_due, on_due, after_due, overdue] }, days_offset: { type: integer, minimum: 0, maximum: 365 }, enabled: { type: boolean } }

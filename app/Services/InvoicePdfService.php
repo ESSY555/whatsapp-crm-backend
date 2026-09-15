@@ -13,13 +13,13 @@ class InvoicePdfService
      */
     public function generate(Invoice $invoice): string
     {
-        $invoice->load(['customer', 'items', 'business']);
+        $invoice->load(['customer', 'items', 'business.settings']);
 
         $html = $this->renderInvoiceHtml($invoice);
 
         $pdf = Pdf::loadHTML($html)
             ->setPaper('a4')
-            ->setOption('defaultFont', 'Arial')
+            ->setOption('defaultFont', 'DejaVu Sans')
             ->setOption('isHtml5ParserEnabled', true);
 
         return $pdf->output();
@@ -58,6 +58,14 @@ class InvoicePdfService
         $discountLine = $invoice->discount > 0 ? "<div class=\"total-row\"><span>Discount:</span><span class=\"amount\">{$this->formatCurrency($invoice->discount, $business->currency)}</span></div>" : '';
         $taxNumberLine = $business->tax_number ? "<p>Tax Number: {$business->tax_number}</p>" : '';
         $notesSection = $invoice->notes ? "<div class=\"section\"><div class=\"section-title\">Notes</div><div class=\"section-content\">" . htmlspecialchars($invoice->notes) . "</div></div>" : '';
+        $logo = $this->logoTag($business);
+        $footerNote = htmlspecialchars((string) $business->setting('invoice_footer', 'Thank you for your business!'));
+        $businessName = htmlspecialchars($business->name);
+        $customerName = htmlspecialchars((string) $customer?->name);
+        $customerBusiness = htmlspecialchars((string) $customer?->business_name);
+        $customerAddress = htmlspecialchars((string) $customer?->address);
+        $customerEmail = htmlspecialchars((string) $customer?->email);
+        $customerPhone = htmlspecialchars((string) $customer?->phone);
 
         return <<<HTML
         <!DOCTYPE html>
@@ -215,7 +223,8 @@ class InvoicePdfService
                 <!-- Header -->
                 <div class="header">
                     <div class="business-info">
-                        <h1>{$business->name}</h1>
+                        {$logo}
+                        <h1>{$businessName}</h1>
                         <p>{$business->address}</p>
                         <p>{$business->city}, {$business->state} {$business->country}</p>
                         <p>Email: {$business->email}</p>
@@ -235,11 +244,11 @@ class InvoicePdfService
                 <div class="section">
                     <div class="section-title">Bill To</div>
                     <div class="section-content">
-                        <p><strong>{$customer->name}</strong></p>
-                        <p>{$customer->business_name}</p>
-                        <p>{$customer->address}</p>
-                        <p>Email: {$customer->email}</p>
-                        <p>Phone: {$customer->phone}</p>
+                        <p><strong>{$customerName}</strong></p>
+                        <p>{$customerBusiness}</p>
+                        <p>{$customerAddress}</p>
+                        <p>Email: {$customerEmail}</p>
+                        <p>Phone: {$customerPhone}</p>
                     </div>
                 </div>
 
@@ -286,13 +295,31 @@ class InvoicePdfService
 
                 <!-- Footer -->
                 <div class="footer">
-                    <p>Thank you for your business!</p>
+                    <p>{$footerNote}</p>
                     <p style="margin-top: 10px; font-size: 10px;">Generated on {now()->format('M d, Y \a\t H:i A')}</p>
                 </div>
             </div>
         </body>
         </html>
         HTML;
+    }
+
+    /**
+     * Inline the business logo as a data URI so dompdf needs no remote fetch.
+     */
+    private function logoTag($business): string
+    {
+        if (!$business->logo || str_starts_with($business->logo, 'http')) {
+            return '';
+        }
+        $disk = Storage::disk('public');
+        if (!$disk->exists($business->logo)) {
+            return '';
+        }
+        $mime = $disk->mimeType($business->logo) ?: 'image/png';
+        $data = base64_encode($disk->get($business->logo));
+
+        return "<img src=\"data:{$mime};base64,{$data}\" style=\"max-height:60px;max-width:180px;margin-bottom:8px;\" alt=\"logo\">";
     }
 
     /**
@@ -330,6 +357,10 @@ class InvoicePdfService
             'EUR' => '€',
             'GBP' => '£',
             'INR' => '₹',
+            'NGN' => '₦',
+            'GHS' => 'GH₵',
+            'KES' => 'KSh',
+            'ZAR' => 'R',
         ];
 
         $symbol = $symbols[$currency] ?? $currency;

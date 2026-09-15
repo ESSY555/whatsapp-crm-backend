@@ -6,12 +6,16 @@ use Illuminate\Http\JsonResponse;
 
 trait ApiResponse
 {
-    protected function successResponse(string $message = 'Operation completed successfully.', mixed $data = [], int $status = 200): JsonResponse
+    /**
+     * Standard success envelope. Passing no data yields `"data": {}`; an
+     * explicit empty array is preserved as `[]` so list endpoints stay lists.
+     */
+    protected function successResponse(string $message = 'Operation completed successfully.', mixed $data = null, int $status = 200): JsonResponse
     {
         return response()->json([
             'success' => true,
             'message' => $message,
-            'data' => empty($data) ? new \stdClass() : $data,
+            'data' => $data ?? new \stdClass(),
         ], $status);
     }
 

@@ -1,0 +1,253 @@
+<?php
+
+namespace Tests\Feature\Api\V1;
+
+use App\Jobs\ProcessWhatsAppWebhook;
+use App\Jobs\SendWhatsAppMessage;
+use App\Models\Message;
+use App\Models\Notification;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Queue;
+use Tests\Concerns\CreatesTenants;
+use Tests\TestCase;
+
+class WhatsAppMessagingTest extends TestCase
+{
+    use RefreshDatabase, CreatesTenants;
+
+    // ------------------------------------------------------------ templates
+
+    public function test_template_crud_search_and_filters(): void
+    {
+        [$user, $business] = $this->membership();
+
+        $created = $this->actingAs($user)->postJson('/api/v1/whatsapp/templates', [
+            'name' => 'Welcome', 'category' => 'greeting',
+            'content' => 'Hello {{customer_name}}, welcome!', 'variables' => ['customer_name' => 'Customer name'],
+        ])->assertCreated()->assertJsonPath('data.status', 'draft')->json('data');
+
+        $this->actingAs($user)->postJson('/api/v1/whatsapp/templates', ['name' => 'Reminder', 'content' => 'Pay up', 'status' => 'approved'])->assertCreated();
+
+        $this->actingAs($user)->getJson('/api/v1/whatsapp/templates')->assertOk()->assertJsonCount(2, 'data.data');
+        $this->actingAs($user)->getJson('/api/v1/whatsapp/templates?status=approved')->assertOk()->assertJsonCount(1, 'data.data')->assertJsonPath('data.data.0.name', 'Reminder');
+        $this->actingAs($user)->getJson('/api/v1/whatsapp/templates?search=welcome')->assertOk()->assertJsonCount(1, 'data.data');
+        $this->actingAs($user)->getJson('/api/v1/templates')->assertOk()->assertJsonCount(2, 'data.data');
+
+        $this->actingAs($user)->putJson("/api/v1/whatsapp/templates/{$created['id']}", ['status' => 'approved', 'name' => 'Welcome v2'])
+            ->assertOk()->assertJsonPath('data.status', 'approved')->assertJsonPath('data.name', 'Welcome v2');
+
+        // Duplicate names are rejected within a business but allowed across businesses.
+        $this->actingAs($user)->postJson('/api/v1/whatsapp/templates', ['name' => 'Reminder', 'content' => 'x'])->assertUnprocessable()->assertJsonValidationErrors('name');
+        [$otherUser] = $this->membership('Other');
+        $this->actingAs($otherUser)->postJson('/api/v1/whatsapp/templates', ['name' => 'Reminder', 'content' => 'x'])->assertCreated();
+
+        $this->actingAs($user)->deleteJson("/api/v1/whatsapp/templates/{$created['id']}")->assertOk();
+        $this->assertDatabaseMissing('message_templates', ['id' => $created['id']]);
+        $this->assertDatabaseHas('audit_logs', ['business_id' => $business->id, 'action' => 'template.deleted']);
+    }
+
+    public function test_templates_are_tenant_isolated(): void
+    {
+        [$userA, $businessA] = $this->membership('A');
+        [$userB] = $this->membership('B');
+        $template = $this->templateFor($businessA);
+
+        $this->actingAs($userB)->getJson("/api/v1/whatsapp/templates/{$template->id}")->assertNotFound();
+        $this->actingAs($userB)->putJson("/api/v1/whatsapp/templates/{$template->id}", ['name' => 'x'])->assertNotFound();
+        $this->actingAs($userA)->getJson("/api/v1/whatsapp/templates/{$template->id}")->assertOk();
+    }
+
+    // ------------------------------------------------------------- sending
+
+    public function test_message_is_queued_and_delivered_through_cloud_api(): void
+    {
+        Queue::fake([SendWhatsAppMessage::class]);
+        [$user, $business] = $this->membership();
+        $this->connectionFor($business);
+        $customer = $this->customerFor($business, ['phone' => '+234 803 000 0001']);
+
+        $response = $this->actingAs($user)->postJson('/api/v1/messages', [
+            'customer_id' => $customer->id, 'body' => 'Hello there',
+        ])->assertCreated()->assertJsonPath('data.status', 'queued')->assertJsonPath('data.direction', 'outbound');
+
+        $messageId = $response->json('data.id');
+        Queue::assertPushed(SendWhatsAppMessage::class, fn ($job) => $job->messageId === $messageId);
+        $this->assertDatabaseHas('conversations', ['business_id' => $business->id, 'customer_id' => $customer->id, 'status' => 'open']);
+
+        // Run the job against a faked Cloud API.
+        Http::fake(['graph.facebook.com/*' => Http::response(['messages' => [['id' => 'wamid.123']]], 200)]);
+        (new SendWhatsAppMessage($messageId))->handle(app(\App\Services\WhatsAppCloudApi::class), app(\App\Services\NotificationService::class));
+
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/phone-1/messages')
+            && $request['to'] === '2348030000001'
+            && $request['text']['body'] === 'Hello there'
+            && $request->hasHeader('Authorization', 'Bearer secret-token'));
+
+        $this->assertDatabaseHas('messages', ['id' => $messageId, 'status' => 'sent', 'whatsapp_message_id' => 'wamid.123']);
+    }
+
+    public function test_cloud_api_failure_marks_message_failed_and_notifies(): void
+    {
+        Queue::fake([SendWhatsAppMessage::class]);
+        [$user, $business] = $this->membership();
+        $this->connectionFor($business);
+        $customer = $this->customerFor($business);
+
+        $messageId = $this->actingAs($user)->postJson('/api/v1/messages', ['customer_id' => $customer->id, 'body' => 'Hi'])->json('data.id');
+
+        Http::fake(['graph.facebook.com/*' => Http::response(['error' => ['message' => 'Invalid OAuth access token', 'code' => 190]], 401)]);
+        (new SendWhatsAppMessage($messageId))->handle(app(\App\Services\WhatsAppCloudApi::class), app(\App\Services\NotificationService::class));
+
+        $this->assertDatabaseHas('messages', ['id' => $messageId, 'status' => 'failed', 'error_message' => 'Invalid OAuth access token']);
+        $this->assertDatabaseHas('whatsapp_connections', ['business_id' => $business->id, 'status' => 'error']);
+        $this->assertDatabaseHas('notifications', ['business_id' => $business->id, 'type' => 'message_failed']);
+        $this->assertDatabaseHas('notifications', ['business_id' => $business->id, 'type' => 'whatsapp_connection_failure']);
+
+        // A failed message can be retried, which re-queues it.
+        $this->actingAs($user)->postJson("/api/v1/messages/{$messageId}/retry")->assertOk()->assertJsonPath('data.status', 'queued');
+        $this->actingAs($user)->postJson("/api/v1/messages/{$messageId}/retry")->assertUnprocessable();
+    }
+
+    public function test_sending_requires_a_whatsapp_connection(): void
+    {
+        [$user, $business] = $this->membership();
+        $customer = $this->customerFor($business);
+
+        $this->actingAs($user)->postJson('/api/v1/messages', ['customer_id' => $customer->id, 'body' => 'Hi'])
+            ->assertUnprocessable()->assertJsonValidationErrors('connection');
+    }
+
+    public function test_template_message_renders_variables_and_requires_approval(): void
+    {
+        Queue::fake();
+        [$user, $business] = $this->membership();
+        $this->connectionFor($business);
+        $customer = $this->customerFor($business, ['name' => 'Amaka']);
+        $approved = $this->templateFor($business, ['content' => 'Hi {{customer_name}}, code {{code}}.']);
+        $draft = $this->templateFor($business, ['status' => 'draft']);
+
+        $this->actingAs($user)->postJson('/api/v1/messages', ['customer_id' => $customer->id, 'template_id' => $approved->id, 'template_variables' => ['code' => '42']])
+            ->assertCreated()->assertJsonPath('data.body', 'Hi Amaka, code 42.')->assertJsonPath('data.template_id', $approved->id);
+
+        $this->actingAs($user)->postJson('/api/v1/messages', ['customer_id' => $customer->id, 'template_id' => $draft->id])
+            ->assertUnprocessable()->assertJsonValidationErrors('template_id');
+    }
+
+    // -------------------------------------------------------- conversations
+
+    public function test_conversations_list_show_update_and_message_listing(): void
+    {
+        Queue::fake();
+        [$user, $business] = $this->membership();
+        $this->connectionFor($business);
+        $customer = $this->customerFor($business, ['name' => 'John Doe']);
+        $other = $this->customerFor($business, ['name' => 'Jane']);
+
+        $conversation = $this->actingAs($user)->postJson('/api/v1/conversations', ['customer_id' => $customer->id])->assertCreated()->json('data');
+        $this->actingAs($user)->postJson('/api/v1/conversations', ['customer_id' => $customer->id])->assertOk()->assertJsonPath('data.id', $conversation['id']);
+        $this->actingAs($user)->postJson('/api/v1/messages', ['conversation_id' => $conversation['id'], 'body' => 'First'])->assertCreated();
+        $this->actingAs($user)->postJson('/api/v1/messages', ['customer_id' => $other->id, 'body' => 'Second'])->assertCreated();
+
+        $this->actingAs($user)->getJson('/api/v1/conversations')->assertOk()->assertJsonCount(2, 'data.data');
+        $this->actingAs($user)->getJson('/api/v1/conversations?search=john')->assertOk()->assertJsonCount(1, 'data.data')->assertJsonPath('data.data.0.customer.name', 'John Doe');
+        $this->actingAs($user)->getJson("/api/v1/conversations/{$conversation['id']}")->assertOk()->assertJsonCount(1, 'data.messages');
+        $this->actingAs($user)->getJson("/api/v1/conversations/{$conversation['id']}/messages?direction=outbound")->assertOk()->assertJsonCount(1, 'data.data');
+        $this->actingAs($user)->getJson("/api/v1/messages?conversation_id={$conversation['id']}")->assertOk()->assertJsonCount(1, 'data.data');
+
+        $this->actingAs($user)->putJson("/api/v1/conversations/{$conversation['id']}", ['status' => 'closed'])->assertOk()->assertJsonPath('data.status', 'closed');
+        $this->actingAs($user)->putJson("/api/v1/conversations/{$conversation['id']}", ['status' => 'bogus'])->assertUnprocessable();
+        $this->actingAs($user)->getJson('/api/v1/conversations?status=closed')->assertOk()->assertJsonCount(1, 'data.data');
+    }
+
+    public function test_conversations_and_messages_are_tenant_isolated(): void
+    {
+        Queue::fake();
+        [$userA, $businessA] = $this->membership('A');
+        [$userB] = $this->membership('B');
+        $this->connectionFor($businessA);
+        $customer = $this->customerFor($businessA);
+        $message = $this->actingAs($userA)->postJson('/api/v1/messages', ['customer_id' => $customer->id, 'body' => 'Private'])->json('data');
+
+        $this->actingAs($userB)->getJson("/api/v1/conversations/{$message['conversation_id']}")->assertNotFound();
+        $this->actingAs($userB)->getJson("/api/v1/messages/{$message['id']}")->assertNotFound();
+        $this->actingAs($userB)->getJson('/api/v1/messages')->assertOk()->assertJsonCount(0, 'data.data');
+        $this->actingAs($userB)->postJson('/api/v1/messages', ['conversation_id' => $message['conversation_id'], 'body' => 'Hijack'])->assertUnprocessable();
+    }
+
+    // -------------------------------------------------------------- webhooks
+
+    public function test_webhook_verification_signature_and_queueing(): void
+    {
+        config(['services.whatsapp.verify_token' => 'verify-me', 'services.whatsapp.app_secret' => 'app-secret']);
+
+        $this->get('/api/v1/webhooks/whatsapp?hub_mode=subscribe&hub_verify_token=verify-me&hub_challenge=challenge')->assertOk()->assertSee('challenge');
+        $this->get('/api/v1/webhooks/whatsapp?hub_verify_token=wrong&hub_challenge=challenge')->assertForbidden();
+
+        Queue::fake();
+        $payload = json_encode(['object' => 'whatsapp_business_account', 'entry' => []]);
+        $this->call('POST', '/api/v1/webhooks/whatsapp', [], [], [], ['CONTENT_TYPE' => 'application/json'], $payload)->assertStatus(401);
+        Queue::assertNothingPushed();
+
+        $signature = 'sha256=' . hash_hmac('sha256', $payload, 'app-secret');
+        $this->call('POST', '/api/v1/webhooks/whatsapp', [], [], [], ['CONTENT_TYPE' => 'application/json', 'HTTP_X_HUB_SIGNATURE_256' => $signature], $payload)->assertStatus(202);
+        Queue::assertPushed(ProcessWhatsAppWebhook::class);
+    }
+
+    public function test_webhook_processing_creates_inbound_messages_and_updates_statuses_idempotently(): void
+    {
+        Queue::fake();
+        [$user, $business] = $this->membership();
+        $this->connectionFor($business, 'phone-9');
+        $customer = $this->customerFor($business, ['phone' => '+234 803 000 0009']);
+        $outbound = $this->actingAs($user)->postJson('/api/v1/messages', ['customer_id' => $customer->id, 'body' => 'Hi'])->json('data');
+        Message::withoutGlobalScopes()->whereKey($outbound['id'])->update(['status' => 'sent', 'whatsapp_message_id' => 'wamid.out']);
+
+        $payload = ['object' => 'whatsapp_business_account', 'entry' => [['changes' => [['value' => [
+            'metadata' => ['phone_number_id' => 'phone-9'],
+            'messages' => [['from' => '2348030000009', 'id' => 'wamid.in', 'type' => 'text', 'text' => ['body' => 'Paid today']]],
+            'statuses' => [['id' => 'wamid.out', 'status' => 'read']],
+        ]]]]]];
+
+        (new ProcessWhatsAppWebhook($payload))->handle(app(\App\Services\WhatsAppService::class));
+        (new ProcessWhatsAppWebhook($payload))->handle(app(\App\Services\WhatsAppService::class));
+
+        $this->assertSame(1, Message::withoutGlobalScopes()->where('whatsapp_message_id', 'wamid.in')->count());
+        $this->assertDatabaseHas('messages', ['whatsapp_message_id' => 'wamid.in', 'direction' => 'inbound', 'customer_id' => $customer->id, 'body' => 'Paid today', 'business_id' => $business->id]);
+        $this->assertDatabaseHas('messages', ['id' => $outbound['id'], 'status' => 'read']);
+
+        // A late "delivered" status must not downgrade "read"; "failed" is recorded with its reason.
+        $late = ['entry' => [['changes' => [['value' => ['metadata' => ['phone_number_id' => 'phone-9'], 'statuses' => [['id' => 'wamid.out', 'status' => 'delivered']]]]]]]];
+        (new ProcessWhatsAppWebhook($late))->handle(app(\App\Services\WhatsAppService::class));
+        $this->assertDatabaseHas('messages', ['id' => $outbound['id'], 'status' => 'read']);
+
+        $failed = ['entry' => [['changes' => [['value' => ['metadata' => ['phone_number_id' => 'phone-9'], 'statuses' => [['id' => 'wamid.out', 'status' => 'failed', 'errors' => [['title' => 'Number not on WhatsApp']]]]]]]]]];
+        (new ProcessWhatsAppWebhook($failed))->handle(app(\App\Services\WhatsAppService::class));
+        $this->assertDatabaseHas('messages', ['id' => $outbound['id'], 'status' => 'failed', 'error_message' => 'Number not on WhatsApp']);
+        $this->assertSame(1, Notification::withoutGlobalScopes()->where('business_id', $business->id)->where('type', 'message_failed')->count());
+
+        // Unknown phone ids are ignored.
+        (new ProcessWhatsAppWebhook(['entry' => [['changes' => [['value' => ['metadata' => ['phone_number_id' => 'nope'], 'messages' => [['from' => '1', 'id' => 'x']]]]]]]]))->handle(app(\App\Services\WhatsAppService::class));
+        $this->assertDatabaseMissing('messages', ['whatsapp_message_id' => 'x']);
+    }
+
+    public function test_connection_management_and_role_restrictions(): void
+    {
+        [$owner, $business] = $this->membership();
+        $manager = \App\Models\User::factory()->create();
+        $business->users()->attach($manager->id, ['role' => 'manager', 'status' => 'active']);
+
+        $connection = $this->actingAs($owner)->postJson('/api/v1/whatsapp/connections', [
+            'phone_number_id' => 'phone-1', 'business_account_id' => 'waba', 'access_token' => 'super-secret-token',
+        ])->assertCreated()->assertJsonMissing(['access_token_encrypted' => 'super-secret-token'])->json('data');
+        $this->assertArrayNotHasKey('access_token_encrypted', $connection);
+        $this->assertDatabaseMissing('whatsapp_connections', ['access_token_encrypted' => 'super-secret-token']);
+
+        Http::fake(['graph.facebook.com/*' => Http::response(['id' => 'phone-1'], 200)]);
+        $this->actingAs($manager)->postJson("/api/v1/whatsapp/connections/{$connection['id']}/verify")->assertOk()->assertJsonPath('data.status', 'active');
+
+        $this->actingAs($owner)->deleteJson("/api/v1/whatsapp/connections/{$connection['id']}")->assertOk();
+        $this->assertDatabaseHas('whatsapp_connections', ['id' => $connection['id'], 'status' => 'disconnected']);
+        $this->assertDatabaseHas('audit_logs', ['business_id' => $business->id, 'action' => 'whatsapp_connection.disconnected']);
+    }
+}

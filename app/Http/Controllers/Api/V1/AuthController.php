@@ -3,15 +3,17 @@
 namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Requests\Auth\ForgotPasswordRequest;
-use Illuminate\Http\Request;
-use App\Http\Requests\Auth\RegisterRequest;
 use App\Http\Requests\Auth\LoginRequest;
+use App\Http\Requests\Auth\RegisterRequest;
 use App\Http\Requests\Auth\ResetPasswordRequest;
 use App\Models\Business;
+use App\Models\BusinessSetting;
 use App\Models\User;
+use App\Tenancy\TenantManager;
 use Illuminate\Auth\Events\PasswordReset;
 use Illuminate\Auth\Events\Registered;
 use Illuminate\Auth\Events\Verified;
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Password;
@@ -20,6 +22,9 @@ use Illuminate\Validation\ValidationException;
 
 class AuthController extends ApiController
 {
+    /**
+     * Register a business and its owner in one transaction.
+     */
     public function register(RegisterRequest $request)
     {
         $validated = $request->validated();
@@ -27,28 +32,40 @@ class AuthController extends ApiController
         $user = DB::transaction(function () use ($validated) {
             $business = Business::create([
                 'name' => $validated['business_name'],
-                'slug' => Str::slug($validated['business_name']) . '-' . Str::random(6),
+                'slug' => $this->uniqueSlug($validated['business_name']),
+                'email' => $validated['business_email'] ?? $validated['email'],
+                'phone' => $validated['business_phone'] ?? $validated['phone'] ?? null,
+                'currency' => $validated['currency'] ?? 'USD',
+                'country' => $validated['country'] ?? null,
+                'timezone' => $validated['timezone'] ?? 'UTC',
                 'status' => 'trial',
             ]);
 
             $user = User::create([
                 'name' => $validated['name'],
                 'email' => $validated['email'],
+                'phone' => $validated['phone'] ?? null,
                 'password' => Hash::make($validated['password']),
             ]);
 
-            $user->businesses()->attach($business->id, [
-                'role' => 'owner',
-                'status' => 'active',
-            ]);
+            $user->businesses()->attach($business->id, ['role' => 'owner', 'status' => 'active']);
 
-            DB::table('business_settings')->insert([
-                'business_id' => $business->id,
-                'key' => 'setup_completed',
-                'value' => 'true',
-                'created_at' => now(),
-                'updated_at' => now(),
-            ]);
+            $defaults = [
+                'setup_completed' => 'true',
+                'invoice_prefix' => 'INV-',
+                'payment_terms_days' => '14',
+                'invoice_footer' => 'Thank you for your business.',
+                'reminders_enabled' => 'true',
+                'payment_receipts_enabled' => 'false',
+            ];
+            if (!empty($validated['industry'])) {
+                $defaults['industry'] = $validated['industry'];
+            }
+            TenantManager::runAs($business->id, function () use ($defaults) {
+                foreach ($defaults as $key => $value) {
+                    BusinessSetting::create(['key' => $key, 'value' => $value]);
+                }
+            });
 
             return $user;
         });
@@ -56,10 +73,7 @@ class AuthController extends ApiController
         event(new Registered($user));
         $token = $user->createToken('auth_token')->plainTextToken;
 
-        return $this->successResponse('Successfully registered.', [
-            'user' => $user->load('businesses'),
-            'token' => $token,
-        ], 201);
+        return $this->successResponse('Successfully registered.', $this->authPayload($user, $token), 201);
     }
 
     public function login(LoginRequest $request)
@@ -74,13 +88,9 @@ class AuthController extends ApiController
             ]);
         }
 
-        $deviceName = $validated['device_name'] ?? 'default_device';
-        $token = $user->createToken($deviceName)->plainTextToken;
+        $token = $user->createToken($validated['device_name'] ?? 'web')->plainTextToken;
 
-        return $this->successResponse('Successfully logged in.', [
-            'user' => $user->load('businesses'),
-            'token' => $token,
-        ]);
+        return $this->successResponse('Successfully logged in.', $this->authPayload($user, $token));
     }
 
     public function logout(Request $request)
@@ -92,8 +102,7 @@ class AuthController extends ApiController
 
     public function user(Request $request)
     {
-        $user = $request->user()->load('businesses');
-        return $this->successResponse('Authenticated user retrieved successfully.', $user);
+        return $this->successResponse('Authenticated user retrieved successfully.', $this->authPayload($request->user())['user']);
     }
 
     public function forgotPassword(ForgotPasswordRequest $request)
@@ -152,5 +161,51 @@ class AuthController extends ApiController
         $user->sendEmailVerificationNotification();
 
         return $this->successResponse('Verification email sent.');
+    }
+
+    /**
+     * The identity payload the frontend keeps: user, memberships and the
+     * business the tenant middleware will resolve by default.
+     */
+    private function authPayload(User $user, ?string $token = null): array
+    {
+        $user->load('businesses');
+        $active = $user->businesses->firstWhere('pivot.status', 'active');
+
+        $data = [
+            'user' => [
+                'id' => $user->id,
+                'name' => $user->name,
+                'email' => $user->email,
+                'phone' => $user->phone,
+                'email_verified_at' => $user->email_verified_at,
+                'created_at' => $user->created_at,
+                'businesses' => $user->businesses->map(fn (Business $b) => [
+                    'id' => $b->id, 'name' => $b->name, 'slug' => $b->slug, 'status' => $b->status,
+                    'currency' => $b->currency, 'logo' => $b->logo,
+                    'role' => $b->pivot->role, 'membership_status' => $b->pivot->status,
+                ])->values(),
+                'business' => $active ? [
+                    'id' => $active->id, 'name' => $active->name, 'slug' => $active->slug, 'status' => $active->status,
+                    'currency' => $active->currency, 'logo' => $active->logo,
+                    'role' => $active->pivot->role,
+                ] : null,
+            ],
+        ];
+        if ($token) {
+            $data['token'] = $token;
+        }
+
+        return $data;
+    }
+
+    private function uniqueSlug(string $name): string
+    {
+        $base = Str::slug($name) ?: 'business';
+        $slug = $base;
+        while (Business::withTrashed()->where('slug', $slug)->exists()) {
+            $slug = $base . '-' . Str::lower(Str::random(5));
+        }
+        return $slug;
     }
 }

@@ -39,6 +39,7 @@ return [
         'verify_token' => env('WHATSAPP_VERIFY_TOKEN'),
         'app_id' => env('WHATSAPP_APP_ID'),
         'app_secret' => env('WHATSAPP_APP_SECRET'),
+        'graph_url' => env('WHATSAPP_GRAPH_URL', 'https://graph.facebook.com/v20.0'),
     ],
 
 ];

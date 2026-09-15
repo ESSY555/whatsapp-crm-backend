@@ -9,6 +9,7 @@ use Illuminate\Support\Facades\Facade;
  * @method static int|null get()
  * @method static void clear()
  * @method static bool has()
+ * @method static mixed runAs(int $businessId, \Closure $callback)
  */
 class TenantManager extends Facade
 {

@@ -11,6 +11,11 @@ class Invoice extends Model
 {
     use BelongsToBusiness;
 
+    public const STATUSES = ['draft', 'sent', 'paid', 'partially_paid', 'overdue', 'cancelled'];
+
+    // Statuses that carry a collectable balance.
+    public const OPEN_STATUSES = ['sent', 'partially_paid', 'overdue'];
+
     protected $fillable = [
         'customer_id', 'invoice_number', 'issue_date', 'due_date', 'discount',
         'notes', 'status', 'created_by',
@@ -27,8 +32,26 @@ class Invoice extends Model
     }
 
     public function customer(): BelongsTo { return $this->belongsTo(Customer::class); }
-    public function business(): BelongsTo { return $this->belongsTo(Business::class); }
     public function items(): HasMany { return $this->hasMany(InvoiceItem::class); }
     public function payments(): HasMany { return $this->hasMany(Payment::class); }
     public function creator(): BelongsTo { return $this->belongsTo(User::class, 'created_by'); }
+    public function reminderLogs(): HasMany { return $this->hasMany(ReminderLog::class); }
+
+    public function scopeOpen($query)
+    {
+        return $query->whereIn('status', self::OPEN_STATUSES)->where('balance_due', '>', 0);
+    }
+
+    public function isOpen(): bool
+    {
+        return in_array($this->status, self::OPEN_STATUSES, true) && (float) $this->balance_due > 0;
+    }
+
+    public function daysOverdue(): int
+    {
+        if (!$this->due_date || $this->due_date->isToday() || $this->due_date->isFuture()) {
+            return 0;
+        }
+        return (int) $this->due_date->copy()->startOfDay()->diffInDays(today());
+    }
 }

@@ -1,8 +1,17 @@
 <?php
 
+use Illuminate\Auth\Access\AuthorizationException;
+use Illuminate\Auth\AuthenticationException;
+use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
+use Illuminate\Http\Request;
+use Illuminate\Validation\ValidationException;
+use Symfony\Component\HttpKernel\Exception\AccessDeniedHttpException;
+use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
+use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
+use Symfony\Component\HttpKernel\Exception\TooManyRequestsHttpException;
 
 return Application::configure(basePath: dirname(__DIR__))
     ->withRouting(
@@ -17,8 +26,10 @@ return Application::configure(basePath: dirname(__DIR__))
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
-        $exceptions->render(function (\Illuminate\Validation\ValidationException $e, \Illuminate\Http\Request $request) {
-            if ($request->is('api/*')) {
+        $isApi = fn (Request $request) => $request->is('api/*') || $request->expectsJson();
+
+        $exceptions->render(function (ValidationException $e, Request $request) use ($isApi) {
+            if ($isApi($request)) {
                 return response()->json([
                     'success' => false,
                     'message' => 'Validation failed.',
@@ -27,17 +38,14 @@ return Application::configure(basePath: dirname(__DIR__))
             }
         });
 
-        $exceptions->render(function (\Illuminate\Auth\AuthenticationException $e, \Illuminate\Http\Request $request) {
-            if ($request->is('api/*')) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Unauthenticated.',
-                ], 401);
+        $exceptions->render(function (AuthenticationException $e, Request $request) use ($isApi) {
+            if ($isApi($request)) {
+                return response()->json(['success' => false, 'message' => 'Unauthenticated.'], 401);
             }
         });
 
-        $exceptions->render(function (\Symfony\Component\HttpKernel\Exception\AccessDeniedHttpException $e, \Illuminate\Http\Request $request) {
-            if ($request->is('api/*')) {
+        $exceptions->render(function (AuthorizationException|AccessDeniedHttpException $e, Request $request) use ($isApi) {
+            if ($isApi($request)) {
                 return response()->json([
                     'success' => false,
                     'message' => 'You do not have permission to perform this action.',
@@ -45,20 +53,36 @@ return Application::configure(basePath: dirname(__DIR__))
             }
         });
 
-        $exceptions->render(function (\Symfony\Component\HttpKernel\Exception\NotFoundHttpException $e, \Illuminate\Http\Request $request) {
-            if ($request->is('api/*')) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Resource not found.',
-                ], 404);
+        $exceptions->render(function (ModelNotFoundException|NotFoundHttpException $e, Request $request) use ($isApi) {
+            if ($isApi($request)) {
+                return response()->json(['success' => false, 'message' => 'Resource not found.'], 404);
             }
         });
 
-        $exceptions->render(function (\Exception $e, \Illuminate\Http\Request $request) {
-            if ($request->is('api/*')) {
+        $exceptions->render(function (TooManyRequestsHttpException $e, Request $request) use ($isApi) {
+            if ($isApi($request)) {
                 return response()->json([
                     'success' => false,
-                    'message' => config('app.debug') ? $e->getMessage() : 'Server Error',
+                    'message' => 'Too many requests. Please slow down.',
+                ], 429, $e->getHeaders());
+            }
+        });
+
+        // Any other HTTP exception (405, 413, abort(...) etc.) keeps its status code.
+        $exceptions->render(function (HttpExceptionInterface $e, Request $request) use ($isApi) {
+            if ($isApi($request)) {
+                return response()->json([
+                    'success' => false,
+                    'message' => $e->getMessage() ?: 'Request failed.',
+                ], $e->getStatusCode(), $e->getHeaders());
+            }
+        });
+
+        $exceptions->render(function (\Throwable $e, Request $request) use ($isApi) {
+            if ($isApi($request)) {
+                return response()->json([
+                    'success' => false,
+                    'message' => config('app.debug') ? $e->getMessage() : 'Server error. Please try again later.',
                 ], 500);
             }
         });
