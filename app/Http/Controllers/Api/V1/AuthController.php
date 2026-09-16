@@ -22,6 +22,9 @@ use Illuminate\Validation\ValidationException;
 
 class AuthController extends ApiController
 {
+    /** Every new business starts on a free trial with Starter quotas and no broadcasts. */
+    public const TRIAL_DAYS = 14;
+
     /**
      * Register a business and its owner in one transaction.
      */
@@ -39,6 +42,7 @@ class AuthController extends ApiController
                 'country' => $validated['country'] ?? null,
                 'timezone' => $validated['timezone'] ?? 'UTC',
                 'status' => 'trial',
+                'trial_ends_at' => now()->addDays(self::TRIAL_DAYS),
             ]);
 
             $user = User::create([
@@ -89,6 +93,32 @@ class AuthController extends ApiController
         }
 
         $token = $user->createToken($validated['device_name'] ?? 'web')->plainTextToken;
+
+        return $this->successResponse('Successfully logged in.', $this->authPayload($user, $token));
+    }
+
+    /**
+     * Sign-in for the platform admin console. Same credentials as a normal
+     * account, but only super admins get a token, so a stolen business
+     * login can never reach /admin.
+     */
+    public function adminLogin(LoginRequest $request)
+    {
+        $validated = $request->validated();
+
+        $user = User::where('email', $validated['email'])->first();
+
+        if (!$user || !Hash::check($validated['password'], $user->password)) {
+            throw ValidationException::withMessages([
+                'email' => ['The provided credentials are incorrect.'],
+            ]);
+        }
+
+        if (!$user->isSuperAdmin()) {
+            return $this->errorResponse('This account does not have administrator access.', 403);
+        }
+
+        $token = $user->createToken('admin-console')->plainTextToken;
 
         return $this->successResponse('Successfully logged in.', $this->authPayload($user, $token));
     }
@@ -167,7 +197,7 @@ class AuthController extends ApiController
      * The identity payload the frontend keeps: user, memberships and the
      * business the tenant middleware will resolve by default.
      */
-    private function authPayload(User $user, ?string $token = null): array
+    public function authPayload(User $user, ?string $token = null): array
     {
         $user->load('businesses');
         $active = $user->businesses->firstWhere('pivot.status', 'active');
@@ -179,6 +209,7 @@ class AuthController extends ApiController
                 'email' => $user->email,
                 'phone' => $user->phone,
                 'email_verified_at' => $user->email_verified_at,
+                'is_super_admin' => $user->isSuperAdmin(),
                 'created_at' => $user->created_at,
                 'businesses' => $user->businesses->map(fn (Business $b) => [
                     'id' => $b->id, 'name' => $b->name, 'slug' => $b->slug, 'status' => $b->status,

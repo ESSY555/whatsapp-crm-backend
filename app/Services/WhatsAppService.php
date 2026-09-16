@@ -21,7 +21,7 @@ use Illuminate\Validation\ValidationException;
  */
 class WhatsAppService
 {
-    public function __construct(private NotificationService $notifications)
+    public function __construct(private NotificationService $notifications, private QuotaService $quota)
     {
     }
 
@@ -33,33 +33,40 @@ class WhatsAppService
      */
     public function sendMessage(array $data): Message
     {
-        return DB::transaction(function () use ($data) {
-            $conversation = isset($data['conversation_id'])
-                ? Conversation::query()->findOrFail($data['conversation_id'])
-                : $this->conversationFor(Customer::query()->findOrFail($data['customer_id']));
+        $conversation = isset($data['conversation_id'])
+            ? Conversation::query()->findOrFail($data['conversation_id'])
+            : $this->conversationFor(Customer::query()->findOrFail($data['customer_id']));
 
-            $template = null;
-            $variables = $data['template_variables'] ?? [];
+        $template = null;
+        $variables = $data['template_variables'] ?? [];
 
-            if (!empty($data['template_id'])) {
-                $template = MessageTemplate::query()->findOrFail($data['template_id']);
-                if (!$template->isApproved()) {
-                    throw ValidationException::withMessages(['template_id' => ["Template '{$template->name}' is not approved for sending."]]);
-                }
-                $variables = array_merge($this->defaultVariables($conversation->customer, $data['invoice'] ?? null), $variables);
-                $body = $template->render($variables);
-            } else {
-                $body = trim((string) ($data['body'] ?? ''));
-                if ($body === '') {
-                    throw ValidationException::withMessages(['body' => ['A message body or template is required.']]);
-                }
+        if (!empty($data['template_id'])) {
+            $template = MessageTemplate::query()->findOrFail($data['template_id']);
+            if (!$template->isApproved()) {
+                throw ValidationException::withMessages(['template_id' => ["Template '{$template->name}' is not approved for sending."]]);
             }
+            $variables = array_merge($this->defaultVariables($conversation->customer, $data['invoice'] ?? null), $variables);
+            $body = $template->render($variables);
+        } else {
+            $body = trim((string) ($data['body'] ?? ''));
+            if ($body === '') {
+                throw ValidationException::withMessages(['body' => ['A message body or template is required.']]);
+            }
+        }
 
+        // Plan enforcement happens here so every send path is covered. It runs
+        // before the transaction so the "limit reached" notification survives
+        // the rejection.
+        $category = $this->quota->categoryFor($conversation, $template, $data['source'] ?? 'manual');
+        $this->quota->assertCanSend($category);
+
+        return DB::transaction(function () use ($data, $conversation, $template, $variables, $body, $category) {
             $message = Message::create([
                 'conversation_id' => $conversation->id,
                 'customer_id' => $conversation->customer_id,
                 'direction' => 'outbound',
                 'type' => $template?->whatsapp_template_id ? 'template' : 'text',
+                'billing_category' => $category,
                 'template_id' => $template?->id,
                 'body' => $body,
                 'status' => 'queued',

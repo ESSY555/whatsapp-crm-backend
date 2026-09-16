@@ -16,13 +16,13 @@ class Message extends Model
     public const STATUS_RANK = ['queued' => 0, 'sending' => 1, 'sent' => 2, 'delivered' => 3, 'read' => 4, 'failed' => 5];
 
     protected $fillable = [
-        'conversation_id', 'customer_id', 'direction', 'type', 'template_id', 'body', 'whatsapp_message_id',
-        'status', 'error_message', 'metadata', 'sent_at', 'delivered_at', 'read_at',
+        'conversation_id', 'customer_id', 'direction', 'type', 'billing_category', 'template_id', 'body', 'whatsapp_message_id',
+        'status', 'error_message', 'metadata', 'sent_at', 'delivered_at', 'read_at', 'charged_at',
     ];
 
     protected function casts(): array
     {
-        return ['sent_at' => 'datetime', 'delivered_at' => 'datetime', 'read_at' => 'datetime', 'metadata' => 'array'];
+        return ['sent_at' => 'datetime', 'delivered_at' => 'datetime', 'read_at' => 'datetime', 'charged_at' => 'datetime', 'metadata' => 'array'];
     }
 
     public function conversation(): BelongsTo { return $this->belongsTo(Conversation::class); }

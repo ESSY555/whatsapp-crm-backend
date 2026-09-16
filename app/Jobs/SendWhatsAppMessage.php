@@ -5,6 +5,7 @@ namespace App\Jobs;
 use App\Models\Message;
 use App\Services\BroadcastService;
 use App\Services\NotificationService;
+use App\Services\QuotaService;
 use App\Services\WhatsAppApiException;
 use App\Services\WhatsAppCloudApi;
 use App\Tenancy\TenantManager;
@@ -63,6 +64,7 @@ class SendWhatsAppMessage implements ShouldQueue
                     'error_message' => null,
                 ]);
                 $connection->update(['last_verified_at' => now()]);
+                app(QuotaService::class)->recordSent($message);
             } catch (WhatsAppApiException $e) {
                 if ($e->isCredentialError()) {
                     $connection->update(['status' => 'error']);
@@ -79,6 +81,7 @@ class SendWhatsAppMessage implements ShouldQueue
     private function fail(Message $message, string $reason, NotificationService $notifications): void
     {
         $message->update(['status' => 'failed', 'error_message' => $reason]);
+        app(QuotaService::class)->recordFailed($message);
         $notifications->messageFailed($message);
         // Keep broadcast recipient rows and counters in step with the failure.
         app(BroadcastService::class)->syncRecipientStatus($message);

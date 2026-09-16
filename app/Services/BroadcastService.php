@@ -19,13 +19,15 @@ class BroadcastService
 {
     public const BATCH_SIZE = 100;
 
-    public function __construct(private WhatsAppService $whatsapp, private NotificationService $notifications)
+    public function __construct(private WhatsAppService $whatsapp, private NotificationService $notifications, private QuotaService $quota)
     {
     }
 
     public function create(array $data, int $userId): Broadcast
     {
         return DB::transaction(function () use ($data, $userId) {
+            $this->quota->assertBroadcastsAllowed();
+
             if (!empty($data['template_id'])) {
                 $template = MessageTemplate::query()->findOrFail($data['template_id']);
                 if (!$template->isApproved()) {
@@ -102,6 +104,7 @@ class BroadcastService
         if (!in_array($broadcast->status, ['draft', 'scheduled'], true)) {
             throw ValidationException::withMessages(['status' => ['Only draft broadcasts can be scheduled.']]);
         }
+        $this->assertWithinPlan($broadcast);
 
         $broadcast->update(['status' => 'scheduled', 'scheduled_at' => $scheduledAt]);
 
@@ -114,11 +117,26 @@ class BroadcastService
         if (!in_array($broadcast->status, ['draft', 'scheduled', 'paused'], true)) {
             throw ValidationException::withMessages(['status' => ['This broadcast is already processing or finished.']]);
         }
+        $this->assertWithinPlan($broadcast);
 
         $broadcast->update(['status' => 'processing', 'started_at' => $broadcast->started_at ?? now()]);
         DB::afterCommit(fn () => SendBroadcastMessages::dispatch($broadcast->id));
 
         return $broadcast;
+    }
+
+    /**
+     * Broadcasts need a plan that includes them and enough marketing quota
+     * for every pending recipient, checked up front so the user gets one
+     * clear message instead of a half-sent blast.
+     */
+    private function assertWithinPlan(Broadcast $broadcast): void
+    {
+        $this->quota->assertBroadcastsAllowed();
+        $pending = $broadcast->recipients()->pending()->count();
+        if ($pending > 0) {
+            $this->quota->assertCanSend('marketing', $pending);
+        }
     }
 
     public function pause(Broadcast $broadcast): Broadcast
@@ -154,6 +172,16 @@ class BroadcastService
 
         if ($recipients->isEmpty()) {
             $this->complete($broadcast);
+            return false;
+        }
+
+        // Out of marketing quota: pause instead of failing every recipient so
+        // the business can upgrade and resume.
+        try {
+            $this->quota->assertCanSend('marketing');
+        } catch (ValidationException $e) {
+            $broadcast->update(['status' => 'paused']);
+            $this->notifications->notify('quota_exhausted', 'Broadcast paused', sprintf('"%s" was paused: %s', $broadcast->name, $e->validator->errors()->first()), ['broadcast_id' => $broadcast->id]);
             return false;
         }
 

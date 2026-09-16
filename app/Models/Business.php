@@ -14,8 +14,13 @@ class Business extends Model
     protected $fillable = [
         'name', 'slug', 'logo', 'email', 'phone', 'address',
         'city', 'state', 'country', 'currency', 'timezone',
-        'tax_number', 'status',
+        'tax_number', 'status', 'trial_ends_at',
     ];
+
+    protected function casts(): array
+    {
+        return ['trial_ends_at' => 'datetime'];
+    }
 
     public function users(): BelongsToMany
     {
@@ -42,6 +47,21 @@ class Business extends Model
     public function invoices(): HasMany
     {
         return $this->hasMany(Invoice::class);
+    }
+
+    public function subscriptions(): HasMany
+    {
+        return $this->hasMany(Subscription::class);
+    }
+
+    public function paymentRequests(): HasMany
+    {
+        return $this->hasMany(PaymentRequest::class);
+    }
+
+    public function onTrial(): bool
+    {
+        return $this->trial_ends_at !== null && $this->trial_ends_at->isFuture();
     }
 
     public function setting(string $key, mixed $default = null): mixed

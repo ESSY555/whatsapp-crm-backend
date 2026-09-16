@@ -19,6 +19,8 @@ class User extends Authenticatable implements MustVerifyEmail
 
     protected $fillable = ['name', 'email', 'phone', 'password'];
 
+    // is_super_admin is deliberately not fillable: it is granted from the console only.
+
     protected $hidden = ['password', 'remember_token'];
 
     protected function casts(): array
@@ -26,6 +28,7 @@ class User extends Authenticatable implements MustVerifyEmail
         return [
             'email_verified_at' => 'datetime',
             'password' => 'hashed',
+            'is_super_admin' => 'boolean',
         ];
     }
 
@@ -34,6 +37,11 @@ class User extends Authenticatable implements MustVerifyEmail
         return $this->belongsToMany(Business::class, 'business_users')
             ->withPivot('role', 'status')
             ->withTimestamps();
+    }
+
+    public function isSuperAdmin(): bool
+    {
+        return (bool) $this->is_super_admin;
     }
 
     public function roleIn(int $businessId): ?string

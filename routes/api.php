@@ -1,7 +1,15 @@
 <?php
 
+use App\Http\Controllers\Api\V1\Admin\BankAccountController as AdminBankAccountController;
+use App\Http\Controllers\Api\V1\Admin\BusinessController as AdminBusinessController;
+use App\Http\Controllers\Api\V1\Admin\DashboardController as AdminDashboardController;
+use App\Http\Controllers\Api\V1\Admin\PaymentRequestController as AdminPaymentRequestController;
+use App\Http\Controllers\Api\V1\Admin\PlanController as AdminPlanController;
+use App\Http\Controllers\Api\V1\Admin\SystemController as AdminSystemController;
+use App\Http\Controllers\Api\V1\Admin\UserController as AdminUserController;
 use App\Http\Controllers\Api\V1\AuditLogController;
 use App\Http\Controllers\Api\V1\AuthController;
+use App\Http\Controllers\Api\V1\BillingController;
 use App\Http\Controllers\Api\V1\BroadcastController;
 use App\Http\Controllers\Api\V1\BusinessController;
 use App\Http\Controllers\Api\V1\ConversationController;
@@ -28,6 +36,7 @@ Route::prefix('v1')->group(function () {
     Route::prefix('auth')->group(function () {
         Route::post('register', [AuthController::class, 'register'])->middleware('throttle:5,1');
         Route::post('login', [AuthController::class, 'login'])->middleware('throttle:5,1');
+        Route::post('admin/login', [AuthController::class, 'adminLogin'])->middleware('throttle:5,1');
         Route::post('forgot-password', [AuthController::class, 'forgotPassword'])->middleware('throttle:5,1');
         Route::post('reset-password', [AuthController::class, 'resetPassword'])->middleware('throttle:5,1');
 
@@ -129,10 +138,53 @@ Route::prefix('v1')->group(function () {
         Route::post('notifications/{notification}/read', [NotificationController::class, 'markRead']);
         Route::delete('notifications/{notification}', [NotificationController::class, 'destroy']);
 
+        // Plan & billing (receipt-based)
+        Route::get('billing', [BillingController::class, 'show']);
+        Route::get('billing/plans', [BillingController::class, 'plans']);
+        Route::get('billing/payment-requests', [BillingController::class, 'requests'])->middleware('business.role:owner,manager');
+        Route::post('billing/payment-requests', [BillingController::class, 'store'])->middleware(['business.role:owner', 'throttle:10,1']);
+        Route::get('billing/payment-requests/{paymentRequest}/receipt', [BillingController::class, 'receipt'])->middleware('business.role:owner,manager');
+
         Route::get('audit-logs', [AuditLogController::class, 'index'])->middleware('business.role:owner,manager');
         Route::get('audit-logs/{auditLog}', [AuditLogController::class, 'show'])->middleware('business.role:owner,manager');
 
         Route::get('search', SearchController::class);
+    });
+
+    // ------------------------------------------------- Platform administration
+    // Super admins see across every business; nothing here is tenant-scoped.
+    Route::prefix('admin')->middleware(['auth:sanctum', 'super.admin'])->group(function () {
+        Route::get('dashboard', [AdminDashboardController::class, 'index']);
+
+        Route::get('businesses', [AdminBusinessController::class, 'index']);
+        Route::get('businesses/{business}', [AdminBusinessController::class, 'show']);
+        Route::post('businesses/{business}/suspend', [AdminBusinessController::class, 'suspend']);
+        Route::post('businesses/{business}/unsuspend', [AdminBusinessController::class, 'unsuspend']);
+        Route::post('businesses/{business}/subscriptions', [AdminBusinessController::class, 'grantSubscription']);
+        Route::post('businesses/{business}/extend-trial', [AdminBusinessController::class, 'extendTrial']);
+        Route::post('businesses/{business}/impersonate', [AdminBusinessController::class, 'impersonate'])->middleware('throttle:20,1');
+
+        Route::get('payment-requests', [AdminPaymentRequestController::class, 'index']);
+        Route::get('payment-requests/{paymentRequest}', [AdminPaymentRequestController::class, 'show']);
+        Route::get('payment-requests/{paymentRequest}/receipt', [AdminPaymentRequestController::class, 'receipt']);
+        Route::post('payment-requests/{paymentRequest}/approve', [AdminPaymentRequestController::class, 'approve']);
+        Route::post('payment-requests/{paymentRequest}/decline', [AdminPaymentRequestController::class, 'decline']);
+
+        Route::apiResource('plans', AdminPlanController::class)->except('show');
+        Route::apiResource('bank-accounts', AdminBankAccountController::class)->except('show')->parameters(['bank-accounts' => 'bankAccount']);
+
+        Route::get('users', [AdminUserController::class, 'index']);
+        Route::get('users/{user}', [AdminUserController::class, 'show']);
+        Route::put('users/{user}/super-admin', [AdminUserController::class, 'setSuperAdmin']);
+        Route::post('users/{user}/verify-email', [AdminUserController::class, 'verifyEmail']);
+        Route::post('users/{user}/password-reset', [AdminUserController::class, 'sendPasswordReset'])->middleware('throttle:10,1');
+        Route::post('users/{user}/revoke-tokens', [AdminUserController::class, 'revokeTokens']);
+
+        Route::get('whatsapp/connections', [AdminSystemController::class, 'connections']);
+        Route::get('audit-logs', [AdminSystemController::class, 'auditLogs']);
+        Route::get('system', [AdminSystemController::class, 'status']);
+        Route::post('system/failed-jobs/retry', [AdminSystemController::class, 'retryFailedJobs']);
+        Route::delete('system/failed-jobs', [AdminSystemController::class, 'flushFailedJobs']);
     });
 
     // ---------------------------------------------------------- Webhooks

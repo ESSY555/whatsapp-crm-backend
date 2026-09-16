@@ -6,6 +6,8 @@ use App\Models\Business;
 use App\Models\Customer;
 use App\Models\Invoice;
 use App\Models\MessageTemplate;
+use App\Models\Plan;
+use App\Models\Subscription;
 use App\Models\User;
 use App\Models\WhatsAppConnection;
 use App\Services\InvoiceService;
@@ -25,7 +27,38 @@ trait CreatesTenants
         $business = Business::create(['name' => $name, 'slug' => $slug ?? strtolower($name) . '-' . uniqid(), 'currency' => 'USD', 'status' => 'active']);
         $user->businesses()->attach($business->id, ['role' => $role, 'status' => 'active']);
 
+        // Fixtures get a generous paid plan so messaging tests are not
+        // limited by quotas; billing tests set their own entitlement.
+        $this->subscribe($business);
+
         return [$user, $business];
+    }
+
+    protected function plan(string $code = 'pro', array $attributes = []): Plan
+    {
+        return Plan::query()->firstOrCreate(['code' => $code], array_merge([
+            'name' => ucfirst($code), 'price' => 40000, 'currency' => 'NGN', 'interval_days' => 30,
+            'utility_quota' => null, 'marketing_quota' => null, 'allows_broadcasts' => true, 'max_team_members' => null,
+            'is_trial_default' => false, 'is_active' => true, 'sort_order' => 3,
+        ], $attributes));
+    }
+
+    protected function subscribe(Business $business, ?Plan $plan = null, int $days = 30): Subscription
+    {
+        return $this->asTenant($business->id, fn () => Subscription::create([
+            'plan_id' => ($plan ?? $this->plan())->id,
+            'status' => 'active',
+            'starts_at' => now()->subMinute(),
+            'ends_at' => now()->addDays($days),
+        ]));
+    }
+
+    protected function superAdmin(): User
+    {
+        $admin = User::factory()->create();
+        $admin->forceFill(['is_super_admin' => true])->save();
+
+        return $admin;
     }
 
     protected function asTenant(int $businessId, Closure $callback): mixed
