@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Enums\PaymentMethod;
 use App\Models\Concerns\BelongsToBusiness;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -18,7 +19,7 @@ class PaymentRequest extends Model
     public const STATUSES = ['pending', 'approved', 'declined'];
 
     protected $fillable = [
-        'plan_id', 'submitted_by', 'amount', 'currency', 'receipt_path', 'receipt_name', 'receipt_mime',
+        'plan_id', 'method', 'submitted_by', 'amount', 'amount_claimed', 'currency', 'receipt_path', 'receipt_name', 'receipt_mime',
         'reference', 'note', 'status', 'reviewed_by', 'reviewed_at', 'decline_reason',
     ];
 
@@ -27,7 +28,7 @@ class PaymentRequest extends Model
 
     protected function casts(): array
     {
-        return ['amount' => 'decimal:2', 'reviewed_at' => 'datetime'];
+        return ['amount' => 'decimal:2', 'amount_claimed' => 'decimal:2', 'reviewed_at' => 'datetime', 'method' => PaymentMethod::class];
     }
 
     public function plan(): BelongsTo
@@ -58,5 +59,11 @@ class PaymentRequest extends Model
     public function isPending(): bool
     {
         return $this->status === 'pending';
+    }
+
+    /** True when the business claims to have paid something other than the plan price. */
+    public function amountMismatch(): bool
+    {
+        return $this->amount_claimed !== null && (float) $this->amount_claimed !== (float) $this->amount;
     }
 }

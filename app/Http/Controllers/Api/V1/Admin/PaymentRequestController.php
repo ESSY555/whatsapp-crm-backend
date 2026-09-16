@@ -50,6 +50,7 @@ class PaymentRequestController extends ApiController
         ]);
 
         $data = $record->toArray();
+        $data['amount_mismatch'] = $record->amountMismatch();
         $data['business']['billing'] = $this->billing->summary($record->business);
         $data['history'] = PaymentRequest::withoutGlobalScopes()->where('business_id', $record->business_id)->whereKeyNot($record->id)
             ->with(['plan:id,code,name', 'reviewer:id,name'])->latest()->limit(10)->get();

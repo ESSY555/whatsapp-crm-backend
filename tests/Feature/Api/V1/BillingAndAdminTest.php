@@ -86,9 +86,11 @@ class BillingAndAdminTest extends TestCase
             'plan_id' => $plan->id,
             'receipt' => UploadedFile::fake()->create('transfer.png', 50, 'image/png'),
             'reference' => 'TRF-001',
+            'amount_claimed' => 14500,
         ], ['Accept' => 'application/json'])->assertCreated();
 
-        $res->assertJsonPath('data.status', 'pending')->assertJsonPath('data.amount', '15000.00')->assertJsonMissingPath('data.receipt_path');
+        $res->assertJsonPath('data.status', 'pending')->assertJsonPath('data.amount', '15000.00')->assertJsonPath('data.amount_claimed', '14500.00')
+            ->assertJsonPath('data.method', 'manual_receipt')->assertJsonMissingPath('data.receipt_path');
         $request = PaymentRequest::withoutGlobalScopes()->findOrFail($res->json('data.id'));
         Storage::disk('local')->assertExists($request->receipt_path);
         $this->assertDatabaseHas('audit_logs', ['business_id' => $business->id, 'action' => 'payment_request.submitted']);
@@ -148,6 +150,21 @@ class BillingAndAdminTest extends TestCase
         $this->assertDatabaseHas('personal_access_tokens', ['tokenable_id' => $admin->id, 'name' => 'admin-console']);
 
         $this->withToken($res->json('data.token'))->getJson('/api/v1/admin/dashboard')->assertOk();
+
+        // A console-only admin (no business) is sent to the admin login by the business login.
+        $this->postJson('/api/v1/auth/login', ['email' => $admin->email, 'password' => 'password'])
+            ->assertForbidden()->assertJsonPath('message', 'This is an administrator account. Sign in at /admin/login instead.');
+    }
+
+    public function test_super_admin_seeder_creates_the_console_account(): void
+    {
+        config(['billing.super_admin.email' => 'console@example.com', 'billing.super_admin.password' => 'console-secret']);
+        $this->artisan('db:seed', ['--class' => 'SuperAdminSeeder'])->assertSuccessful();
+
+        $user = User::query()->where('email', 'console@example.com')->firstOrFail();
+        $this->assertTrue($user->isSuperAdmin());
+        $this->assertNotNull($user->email_verified_at);
+        $this->postJson('/api/v1/auth/admin/login', ['email' => 'console@example.com', 'password' => 'console-secret'])->assertOk();
     }
 
     public function test_super_admin_cannot_be_granted_through_registration_or_profile(): void
@@ -175,7 +192,7 @@ class BillingAndAdminTest extends TestCase
         $this->actingAs($admin)->getJson('/api/v1/admin/payment-requests')->assertOk()
             ->assertJsonPath('data.total', 1)->assertJsonPath('data.data.0.business.name', 'Trial Co');
         $this->actingAs($admin)->getJson("/api/v1/admin/payment-requests/{$requestId}")->assertOk()
-            ->assertJsonPath('data.business.billing.state', 'trial');
+            ->assertJsonPath('data.business.billing.state', 'trial')->assertJsonPath('data.amount_mismatch', false);
         $this->actingAs($admin)->get("/api/v1/admin/payment-requests/{$requestId}/receipt")->assertOk();
 
         $res = $this->actingAs($admin)->postJson("/api/v1/admin/payment-requests/{$requestId}/approve")->assertOk();
@@ -259,8 +276,8 @@ class BillingAndAdminTest extends TestCase
             $id = $this->actingAs($user)->postJson('/api/v1/messages', ['customer_id' => $customer->id, 'body' => "Hi {$i}"])->assertCreated()->json('data.id');
             $message = Message::withoutGlobalScopes()->findOrFail($id);
             $this->assertSame('utility', $message->billing_category);
-            // Simulate a successful send so the counter moves.
-            $this->asTenant($business->id, fn () => app(\App\Services\QuotaService::class)->recordSent($message));
+            // Simulate delivery so the counter moves.
+            $this->asTenant($business->id, fn () => app(\App\Services\QuotaService::class)->recordDelivered($message));
         }
 
         $this->actingAs($user)->postJson('/api/v1/messages', ['customer_id' => $customer->id, 'body' => 'One too many'])
@@ -281,7 +298,7 @@ class BillingAndAdminTest extends TestCase
         $customer = $this->customerFor($business);
 
         // Use the whole utility quota first.
-        $this->asTenant($business->id, fn () => \App\Models\MessageUsage::create(['period_start' => \App\Models\MessageUsage::currentPeriod(), 'category' => 'utility', 'sent_count' => 3]));
+        $this->asTenant($business->id, fn () => \App\Models\MessageUsage::create(['period_start' => \App\Models\MessageUsage::periodStartFor($business, null), 'category' => 'utility', 'sent_count' => 3]));
         $this->actingAs($user)->postJson('/api/v1/messages', ['customer_id' => $customer->id, 'body' => 'Blocked'])->assertUnprocessable();
 
         // A customer message opens the 24h window; the reply is a free service message.
@@ -319,13 +336,18 @@ class BillingAndAdminTest extends TestCase
 
         $this->artisan('subscriptions:expire')->assertSuccessful();
 
+        // Ended period -> grace first (full access), then expired once grace runs out.
+        $this->assertSame('grace', $ending->fresh()->status);
+        $this->assertSame('active', $business->fresh()->status);
+        $ending->update(['grace_ends_at' => now()->subMinute()]);
+        $this->artisan('subscriptions:expire')->assertSuccessful();
         $this->assertSame('expired', $ending->fresh()->status);
         $this->assertSame('expired', $business->fresh()->status);
         $this->assertDatabaseHas('notifications', ['business_id' => $business->id, 'type' => 'subscription_expired']);
         $this->assertDatabaseHas('notifications', ['business_id' => $otherBusiness->id, 'type' => 'subscription_expiring']);
         $this->assertNotNull($soon->fresh()->expiry_notified_at);
 
-        // Second run does not repeat the warning.
+        // Further runs do not repeat the 7-day warning.
         $this->artisan('subscriptions:expire')->assertSuccessful();
         $this->assertSame(1, \App\Models\Notification::withoutGlobalScopes()->where('business_id', $otherBusiness->id)->where('type', 'subscription_expiring')->count());
     }

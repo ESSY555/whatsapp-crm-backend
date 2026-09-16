@@ -64,7 +64,7 @@ class SendWhatsAppMessage implements ShouldQueue
                     'error_message' => null,
                 ]);
                 $connection->update(['last_verified_at' => now()]);
-                app(QuotaService::class)->recordSent($message);
+                // Quota is charged on the delivered webhook, not here.
             } catch (WhatsAppApiException $e) {
                 if ($e->isCredentialError()) {
                     $connection->update(['status' => 'error']);

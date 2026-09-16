@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Enums\PaymentMethod;
 use App\Models\BankAccount;
 use App\Models\Business;
 use App\Models\MessageUsage;
@@ -77,13 +78,30 @@ class BillingService
         if ($business->status === 'suspended') {
             return 'suspended';
         }
-        if ($this->currentSubscription($business)) {
-            return 'active';
+        if ($subscription = $this->currentSubscription($business)) {
+            return $subscription->inGrace() ? 'grace' : 'active';
         }
         if ($business->onTrial()) {
             return 'trial';
         }
         return 'expired';
+    }
+
+    /**
+     * Where the business is in the payment flow, independent of access:
+     * none | pending (receipt awaiting review) | declined (last receipt refused).
+     */
+    public function paymentStateFor(Business $business): string
+    {
+        $latest = PaymentRequest::withoutGlobalScopes()->where('business_id', $business->id)->latest()->first();
+        if (!$latest) {
+            return 'none';
+        }
+        return match ($latest->status) {
+            'pending' => 'pending',
+            'declined' => 'declined',
+            default => 'none',
+        };
     }
 
     // ------------------------------------------------------------ requests
@@ -106,8 +124,10 @@ class BillingService
 
         return TenantManager::runAs($business->id, fn () => PaymentRequest::create([
             'plan_id' => $plan->id,
+            'method' => PaymentMethod::ManualReceipt,
             'submitted_by' => $user->id,
             'amount' => $plan->price,
+            'amount_claimed' => isset($data['amount_claimed']) ? (float) $data['amount_claimed'] : $plan->price,
             'currency' => $plan->currency,
             'receipt_path' => $path,
             'receipt_name' => $receipt->getClientOriginalName(),
@@ -185,8 +205,12 @@ class BillingService
         $current = $this->currentSubscription($business);
         $latest = Subscription::withoutGlobalScopes()->where('business_id', $business->id)->where('status', 'active')->orderByDesc('ends_at')->first();
 
+        // Stack after a running period; a grace period is ended by the renewal.
         $startsAt = ($latest && $latest->ends_at->isFuture()) ? $latest->ends_at->copy() : now();
         $endsAt = $startsAt->copy()->addDays($days ?? $plan->interval_days);
+        if ($current && $current->inGrace()) {
+            $current->update(['status' => 'expired', 'grace_ends_at' => now()]);
+        }
 
         $subscription = TenantManager::runAs($business->id, fn () => Subscription::create([
             'plan_id' => $plan->id,
@@ -213,23 +237,38 @@ class BillingService
     {
         $expired = 0;
         $notified = 0;
+        $graceDays = max(0, (int) config('billing.grace_days', 5));
 
+        // 1. Periods that ended: enter grace (or expire straight away when a
+        //    stacked renewal takes over, or grace is disabled).
         Subscription::withoutGlobalScopes()->where('status', 'active')->where('ends_at', '<=', now())
+            ->with('plan')->orderBy('id')->chunkById(100, function ($rows) use (&$expired, $graceDays) {
+                foreach ($rows as $subscription) {
+                    $hasRenewal = Subscription::withoutGlobalScopes()->where('business_id', $subscription->business_id)
+                        ->whereKeyNot($subscription->id)->where('status', 'active')->where('starts_at', '<=', now())->where('ends_at', '>', now())->exists();
+
+                    if ($hasRenewal || $graceDays === 0) {
+                        $this->expire($subscription, $hasRenewal);
+                        $expired++;
+                        continue;
+                    }
+
+                    $subscription->update(['status' => 'grace', 'grace_ends_at' => $subscription->ends_at->copy()->addDays($graceDays)]);
+                    TenantManager::runAs($subscription->business_id, fn () => $this->notifications->notify(
+                        'subscription_expiring',
+                        'Plan ended — renew within ' . $graceDays . ' days',
+                        sprintf('Your %s plan ended on %s. Upload a payment receipt by %s to keep sending messages.', $subscription->plan->name, $subscription->ends_at->format('M d, Y'), $subscription->grace_ends_at->format('M d, Y')),
+                        ['subscription_id' => $subscription->id],
+                    ));
+                }
+            });
+
+        // 2. Grace periods that ran out.
+        Subscription::withoutGlobalScopes()->where('status', 'grace')->where('grace_ends_at', '<=', now())
             ->with('plan')->orderBy('id')->chunkById(100, function ($rows) use (&$expired) {
                 foreach ($rows as $subscription) {
-                    $subscription->update(['status' => 'expired']);
+                    $this->expire($subscription, false);
                     $expired++;
-
-                    $business = Business::query()->find($subscription->business_id);
-                    if ($business && !$this->currentSubscription($business) && $business->status === 'active') {
-                        $business->update(['status' => 'expired']);
-                        TenantManager::runAs($business->id, fn () => $this->notifications->notify(
-                            'subscription_expired',
-                            'Subscription expired',
-                            sprintf('Your %s plan ended on %s. Upload a payment receipt to keep sending messages.', $subscription->plan->name, $subscription->ends_at->format('M d, Y')),
-                            ['subscription_id' => $subscription->id],
-                        ));
-                    }
                 }
             });
 
@@ -265,6 +304,25 @@ class BillingService
         return [$expired, $notified];
     }
 
+    private function expire(Subscription $subscription, bool $hasRenewal): void
+    {
+        $subscription->update(['status' => 'expired']);
+        if ($hasRenewal) {
+            return;
+        }
+
+        $business = Business::query()->find($subscription->business_id);
+        if ($business && !$this->currentSubscription($business) && $business->status === 'active') {
+            $business->update(['status' => 'expired']);
+            TenantManager::runAs($business->id, fn () => $this->notifications->notify(
+                'subscription_expired',
+                'Subscription expired',
+                sprintf('Your %s plan ended on %s. WhatsApp sending is paused until a new payment receipt is approved.', $subscription->plan->name, $subscription->ends_at->format('M d, Y')),
+                ['subscription_id' => $subscription->id],
+            ));
+        }
+    }
+
     // ------------------------------------------------------------ presentation
 
     /**
@@ -275,13 +333,14 @@ class BillingService
         $subscription = $this->currentSubscription($business);
         $plan = $this->planFor($business);
         $state = $this->stateFor($business);
-        $period = MessageUsage::currentPeriod();
+        $period = MessageUsage::periodStartFor($business, $subscription);
+        $periodEnd = $subscription ? $subscription->ends_at : $business->trial_ends_at;
 
-        $usage = MessageUsage::withoutGlobalScopes()
-            ->where('business_id', $business->id)
-            ->where('period_start', $period)
-            ->get()
-            ->keyBy('category');
+        $usage = MessageUsage::withoutGlobalScopes()->forCycle($business, $subscription)->get()->keyBy('category');
+        $quota = app(QuotaService::class);
+        $inFlightUtility = $quota->inFlightCount($business, $period, ['utility', 'authentication']);
+        $inFlightMarketing = $quota->inFlightCount($business, $period, ['marketing']);
+        $utilityPoolSent = ($usage->get('utility')?->sent_count ?? 0) + ($usage->get('authentication')?->sent_count ?? 0);
 
         $pending = PaymentRequest::withoutGlobalScopes()->where('business_id', $business->id)->pending()->with('plan')->latest()->first();
         $lastDeclined = PaymentRequest::withoutGlobalScopes()->where('business_id', $business->id)->where('status', 'declined')->with('plan')->latest('reviewed_at')->first();
@@ -289,7 +348,15 @@ class BillingService
 
         return [
             'state' => $state,
+            'payment_state' => $this->paymentStateFor($business),
             'status' => $business->status,
+            'hard_block' => (bool) config('billing.hard_block', true),
+            'grace_days' => (int) config('billing.grace_days', 5),
+            'cycle' => [
+                'starts_at' => $period,
+                'ends_at' => $periodEnd,
+                'days_remaining' => $periodEnd ? max(0, (int) ceil(now()->diffInDays($periodEnd, false))) : 0,
+            ],
             'trial_ends_at' => $business->trial_ends_at,
             'trial_days_left' => $business->onTrial() ? max(0, (int) ceil(now()->diffInDays($business->trial_ends_at, false))) : 0,
             'plan' => $plan ? $this->presentPlan($plan) : null,
@@ -299,6 +366,7 @@ class BillingService
                 'status' => $subscription->status,
                 'starts_at' => $subscription->starts_at,
                 'ends_at' => $subscription->ends_at,
+                'grace_ends_at' => $subscription->grace_ends_at,
                 'days_remaining' => $subscription->daysRemaining(),
             ] : null,
             'upcoming_subscription' => $upcoming ? [
@@ -309,9 +377,16 @@ class BillingService
             ] : null,
             'usage' => [
                 'period_start' => $period->toDateString(),
-                'utility' => $this->usageRow($usage->get('utility'), $plan?->quotaFor('utility')),
-                'marketing' => $this->usageRow($usage->get('marketing'), $plan?->quotaFor('marketing')),
-                'service' => $this->usageRow($usage->get('service'), null),
+                // Pools (what quotas apply to): utility + authentication share the included messages.
+                'utility' => $this->usageRow($utilityPoolSent, ($usage->get('utility')?->failed_count ?? 0) + ($usage->get('authentication')?->failed_count ?? 0), $plan?->quotaFor('utility'), $inFlightUtility),
+                'marketing' => $this->usageRow($usage->get('marketing')?->sent_count ?? 0, $usage->get('marketing')?->failed_count ?? 0, $plan && $plan->allows_broadcasts ? $plan->quotaFor('marketing') : 0, $inFlightMarketing),
+                'service' => $this->usageRow($usage->get('service')?->sent_count ?? 0, $usage->get('service')?->failed_count ?? 0, null, 0),
+                // Raw per-category counts for the usage table.
+                'by_category' => collect(MessageUsage::CATEGORIES)->map(fn ($c) => [
+                    'category' => $c,
+                    'delivered' => $usage->get($c)?->sent_count ?? 0,
+                    'failed' => $usage->get($c)?->failed_count ?? 0,
+                ])->values(),
             ],
             'pending_request' => $pending,
             // Only surfaced until the business submits something newer.
@@ -346,15 +421,14 @@ class BillingService
         return Storage::disk(self::RECEIPT_DISK);
     }
 
-    private function usageRow(?MessageUsage $row, ?int $quota): array
+    private function usageRow(int $sent, int $failed, ?int $quota, int $inFlight): array
     {
-        $sent = $row?->sent_count ?? 0;
-
         return [
             'sent' => $sent,
-            'failed' => $row?->failed_count ?? 0,
+            'in_flight' => $inFlight,
+            'failed' => $failed,
             'quota' => $quota,
-            'remaining' => $quota === null ? null : max(0, $quota - $sent),
+            'remaining' => $quota === null ? null : max(0, $quota - $sent - $inFlight),
         ];
     }
 

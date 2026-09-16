@@ -101,6 +101,9 @@ class BusinessController extends ApiController
 
         return [
             'state' => $summary['state'],
+            'payment_state' => $summary['payment_state'],
+            'cycle_ends_at' => $summary['cycle']['ends_at'],
+            'grace_ends_at' => $summary['subscription']['grace_ends_at'] ?? null,
             'plan_name' => $summary['plan']['name'] ?? null,
             'plan_code' => $summary['plan']['code'] ?? null,
             'ends_at' => $summary['subscription']['ends_at'] ?? $summary['trial_ends_at'],

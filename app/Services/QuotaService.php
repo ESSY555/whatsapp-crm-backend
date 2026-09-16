@@ -7,7 +7,9 @@ use App\Models\Conversation;
 use App\Models\Message;
 use App\Models\MessageTemplate;
 use App\Models\MessageUsage;
+use App\Models\Notification;
 use App\Models\Plan;
+use App\Models\Subscription;
 use App\Tenancy\TenantManager;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -16,23 +18,43 @@ use Illuminate\Validation\ValidationException;
  * Plan enforcement for outbound WhatsApp. Every send path funnels through
  * WhatsAppService::sendMessage(), so a single check here covers manual
  * messages, reminders, scheduled messages and broadcasts.
+ *
+ * Policy (v1, no payment processor):
+ *  - HARD BLOCK: once the cycle's included messages are used, further
+ *    Utility sends are rejected with a clear error the UI shows as
+ *    "WhatsApp quota reached for this cycle". Overage is not allowed because
+ *    there is no way to bill it. `config('billing.hard_block')` flips this to
+ *    "allow and flag for manual review".
+ *  - Usage is counted on the *delivered* webhook (Meta only charges for
+ *    delivered messages). Messages already queued/sent but not yet delivered
+ *    are reserved against the quota so a burst cannot overshoot.
+ *  - Marketing (broadcasts, promotional templates) is metered separately and
+ *    never draws from the Utility quota. No v1 plan includes it.
+ *  - Authentication (OTP-style templates) is priced like Utility by Meta and
+ *    draws from the same quota, but is tracked as its own category.
  */
 class QuotaService
 {
-    public const CATEGORIES = ['utility', 'marketing', 'service'];
+    public const CATEGORIES = MessageUsage::CATEGORIES;
 
-    /** Template categories that count as marketing on the Meta rate card. */
+    /** Categories that consume the plan's included ("utility") quota. */
+    private const UTILITY_POOL = ['utility', 'authentication'];
+
     private const MARKETING_TEMPLATE_CATEGORIES = ['marketing', 'promotion', 'promotional', 'promo', 'campaign'];
+    private const AUTHENTICATION_TEMPLATE_CATEGORIES = ['authentication', 'auth', 'otp', 'verification'];
 
     public function __construct(private BillingService $billing, private NotificationService $notifications)
     {
     }
+
+    // ------------------------------------------------------------ classification
 
     /**
      * Which bucket a message will be billed in.
      *
      * - A reply inside the 24-hour customer service window is free.
      * - Broadcasts and marketing-category templates are marketing.
+     * - Authentication-category templates are authentication.
      * - Everything else (invoices, reminders, receipts) is utility.
      */
     public function categoryFor(?Conversation $conversation, ?MessageTemplate $template, string $source = 'manual'): string
@@ -46,12 +68,29 @@ class QuotaService
         }
 
         $category = strtolower((string) ($template?->category ?? ''));
-        if ($category !== '' && in_array($category, self::MARKETING_TEMPLATE_CATEGORIES, true)) {
-            return 'marketing';
+        if ($category !== '') {
+            if (in_array($category, self::MARKETING_TEMPLATE_CATEGORIES, true)) {
+                return 'marketing';
+            }
+            if (in_array($category, self::AUTHENTICATION_TEMPLATE_CATEGORIES, true)) {
+                return 'authentication';
+            }
         }
 
         return 'utility';
     }
+
+    /** The quota pool a category is charged to (null = free). */
+    public static function poolFor(string $category): ?string
+    {
+        return match (true) {
+            in_array($category, self::UTILITY_POOL, true) => 'utility',
+            $category === 'marketing' => 'marketing',
+            default => null,
+        };
+    }
+
+    // ------------------------------------------------------------ enforcement
 
     /**
      * Throw a validation error if the current tenant cannot send `$count`
@@ -69,13 +108,27 @@ class QuotaService
             throw ValidationException::withMessages(['plan' => [$this->noPlanMessage($business)]]);
         }
 
-        $remaining = $this->remaining($business, $plan, $category);
+        $pool = self::poolFor($category);
+        if ($pool === null) {
+            return; // service-window replies are free
+        }
+
+        if ($pool === 'marketing' && !$plan->allows_broadcasts) {
+            throw ValidationException::withMessages(['plan' => [$this->marketingNotIncludedMessage($plan)]]);
+        }
+
+        $remaining = $this->remaining($business, $plan, $pool);
         if ($remaining !== null && $remaining < $count) {
-            $label = $category === 'marketing' ? 'marketing' : 'utility';
+            $this->notifyExhausted($business, $pool, $plan);
+
+            if (!config('billing.hard_block', true)) {
+                return; // overage allowed; the exhausted notification flags it for review
+            }
+
+            $quota = $plan->quotaFor($pool);
             $message = $remaining === 0
-                ? sprintf('You have used all %d %s messages on your %s plan this month. Upgrade your plan to keep sending.', $plan->quotaFor($category), $label, $plan->name)
-                : sprintf('This needs %d %s messages but only %d remain on your %s plan this month.', $count, $label, $remaining, $plan->name);
-            $this->notifyExhausted($business, $category, $plan);
+                ? sprintf('WhatsApp quota reached for this cycle: all %d included messages on your %s plan are used. Upgrade your plan or wait for the next cycle.', $quota, $plan->name)
+                : sprintf('This needs %d messages but only %d remain in this cycle on your %s plan.', $count, $remaining, $plan->name);
             throw ValidationException::withMessages(['plan' => [$message]]);
         }
     }
@@ -92,37 +145,56 @@ class QuotaService
             throw ValidationException::withMessages(['plan' => [$this->noPlanMessage($business)]]);
         }
         if (!$plan->allows_broadcasts) {
-            $reason = $plan->code === 'trial'
-                ? 'Broadcasts are not available during the free trial. Subscribe to a plan that includes broadcasts.'
-                : sprintf('Your %s plan does not include broadcasts. Upgrade to send bulk messages.', $plan->name);
-            throw ValidationException::withMessages(['plan' => [$reason]]);
+            throw ValidationException::withMessages(['plan' => [$this->marketingNotIncludedMessage($plan)]]);
         }
     }
 
     /**
-     * Messages left this month for a category; null means unlimited.
+     * Messages left in the current cycle for a pool; null means unlimited.
+     * Counts delivered messages plus in-flight ones that will be charged
+     * once delivered.
      */
-    public function remaining(Business $business, Plan $plan, string $category): ?int
+    public function remaining(Business $business, Plan $plan, string $pool): ?int
     {
-        $quota = $plan->quotaFor($category);
+        $quota = $plan->quotaFor($pool);
         if ($quota === null) {
             return null;
         }
 
-        $sent = (int) MessageUsage::withoutGlobalScopes()
-            ->where('business_id', $business->id)
-            ->where('period_start', MessageUsage::currentPeriod())
-            ->where('category', $category)
-            ->value('sent_count');
+        $subscription = $this->billing->currentSubscription($business);
+        $periodStart = MessageUsage::periodStartFor($business, $subscription);
+        $categories = $pool === 'utility' ? self::UTILITY_POOL : [$pool];
 
-        return max(0, $quota - $sent);
+        $charged = (int) MessageUsage::withoutGlobalScopes()
+            ->forCycle($business, $subscription)
+            ->whereIn('category', $categories)
+            ->sum('sent_count');
+
+        $inFlight = $this->inFlightCount($business, $periodStart, $categories);
+
+        return max(0, $quota - $charged - $inFlight);
     }
 
+    /** Outbound messages created this cycle that are not yet delivered or failed. */
+    public function inFlightCount(Business $business, \Illuminate\Support\Carbon $periodStart, array $categories): int
+    {
+        return Message::withoutGlobalScopes()
+            ->where('business_id', $business->id)
+            ->where('direction', 'outbound')
+            ->whereIn('billing_category', $categories)
+            ->whereNull('charged_at')
+            ->whereIn('status', ['queued', 'sending', 'sent'])
+            ->where('created_at', '>=', $periodStart)
+            ->count();
+    }
+
+    // ------------------------------------------------------------ metering
+
     /**
-     * Count a message that actually left through the Cloud API. Idempotent
-     * per message via charged_at.
+     * Count a message the WhatsApp webhook reported as delivered (or read,
+     * which implies delivered). Idempotent per message via charged_at.
      */
-    public function recordSent(Message $message): void
+    public function recordDelivered(Message $message): void
     {
         if ($message->charged_at || $message->direction !== 'outbound') {
             return;
@@ -143,16 +215,24 @@ class QuotaService
     private function bump(Message $message, string $column): void
     {
         $category = $message->billing_category ?: 'utility';
-        $period = MessageUsage::currentPeriod();
+        $business = Business::query()->find($message->business_id);
+        if (!$business) {
+            return;
+        }
 
-        DB::transaction(function () use ($message, $category, $period, $column) {
+        $subscription = $this->billing->currentSubscription($business);
+        $periodStart = MessageUsage::periodStartFor($business, $subscription);
+
+        DB::transaction(function () use ($message, $category, $periodStart, $subscription, $column) {
             $row = MessageUsage::withoutGlobalScopes()->firstOrCreate(
-                ['business_id' => $message->business_id, 'period_start' => $period, 'category' => $category],
+                ['business_id' => $message->business_id, 'subscription_id' => $subscription?->id, 'period_start' => $periodStart, 'category' => $category],
                 ['sent_count' => 0, 'failed_count' => 0],
             );
             $row->increment($column);
         });
     }
+
+    // ------------------------------------------------------------ helpers
 
     private function inServiceWindow(Conversation $conversation): bool
     {
@@ -171,19 +251,30 @@ class QuotaService
 
     private function noPlanMessage(Business $business): string
     {
+        if ($business->status === 'suspended') {
+            return 'This workspace is suspended. Contact support to restore WhatsApp sending.';
+        }
         return $business->trial_ends_at
-            ? 'Your free trial has ended. Upload a payment receipt in Settings → Plan & billing to keep sending messages.'
-            : 'No active plan. Upload a payment receipt in Settings → Plan & billing to start sending messages.';
+            ? 'Your plan has expired. Upload a payment receipt under Billing to keep sending WhatsApp messages.'
+            : 'No active plan. Upload a payment receipt under Billing to start sending WhatsApp messages.';
     }
 
-    /** One in-app heads-up per business, category and month. */
-    private function notifyExhausted(Business $business, string $category, Plan $plan): void
+    private function marketingNotIncludedMessage(Plan $plan): string
     {
-        $alreadySent = \App\Models\Notification::withoutGlobalScopes()
+        return sprintf('Broadcasts and marketing messages are not included in your %s plan. Contact support to add them.', $plan->name);
+    }
+
+    /** One in-app heads-up per business, pool and cycle. */
+    private function notifyExhausted(Business $business, string $pool, Plan $plan): void
+    {
+        $subscription = $this->billing->currentSubscription($business);
+        $periodStart = MessageUsage::periodStartFor($business, $subscription);
+
+        $alreadySent = Notification::withoutGlobalScopes()
             ->where('business_id', $business->id)
             ->where('type', 'quota_exhausted')
-            ->where('created_at', '>=', now()->startOfMonth())
-            ->where('data->category', $category)
+            ->where('created_at', '>=', $periodStart)
+            ->where('data->category', $pool)
             ->exists();
         if ($alreadySent) {
             return;
@@ -191,9 +282,9 @@ class QuotaService
 
         $this->notifications->notify(
             'quota_exhausted',
-            'Message limit reached',
-            sprintf('You have reached the %s message limit on your %s plan for this month.', $category, $plan->name),
-            ['category' => $category, 'plan' => $plan->code],
+            'WhatsApp quota reached',
+            sprintf('You have used all %s messages included in your %s plan for this cycle.', $pool, $plan->name),
+            ['category' => $pool, 'plan' => $plan->code],
         );
     }
 }

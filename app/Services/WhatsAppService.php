@@ -182,7 +182,14 @@ class WhatsAppService
 
         $message->update($updates);
 
+        // Meta bills delivered messages, so that is when quota is consumed.
+        // "read" implies delivered in case the delivered event was missed.
+        if (in_array($status, ['delivered', 'read'], true)) {
+            $this->quota->recordDelivered($message);
+        }
+
         if ($status === 'failed') {
+            $this->quota->recordFailed($message);
             $this->notifications->messageFailed($message);
         }
 

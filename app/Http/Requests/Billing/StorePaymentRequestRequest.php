@@ -17,6 +17,7 @@ class StorePaymentRequestRequest extends FormRequest
             'plan_id' => ['required', 'integer', 'exists:plans,id'],
             // Bank transfer receipts: a photo/screenshot or the bank's PDF.
             'receipt' => ['required', 'file', 'mimes:jpg,jpeg,png,webp,pdf', 'max:5120'],
+            'amount_claimed' => ['nullable', 'numeric', 'min:0'],
             'reference' => ['nullable', 'string', 'max:120'],
             'note' => ['nullable', 'string', 'max:1000'],
         ];

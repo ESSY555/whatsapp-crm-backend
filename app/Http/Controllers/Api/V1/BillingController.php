@@ -47,11 +47,11 @@ class BillingController extends ApiController
         $plan = Plan::query()->findOrFail($request->validated('plan_id'));
 
         $paymentRequest = $this->billing->submitPaymentRequest(
-            $this->business(), $request->user(), $plan, $request->file('receipt'), $request->safe()->only('reference', 'note'),
+            $this->business(), $request->user(), $plan, $request->file('receipt'), $request->safe()->only('reference', 'note', 'amount_claimed'),
         );
 
         $this->audit->log('payment_request.submitted', $paymentRequest, null, null, [
-            'plan' => $plan->code, 'amount' => (float) $paymentRequest->amount, 'reference' => $paymentRequest->reference,
+            'plan' => $plan->code, 'amount' => (float) $paymentRequest->amount, 'amount_claimed' => (float) $paymentRequest->amount_claimed, 'reference' => $paymentRequest->reference,
         ]);
 
         return $this->successResponse('Receipt uploaded. We will review your payment shortly.', $paymentRequest, 201);

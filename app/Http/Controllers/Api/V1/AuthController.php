@@ -42,7 +42,7 @@ class AuthController extends ApiController
                 'country' => $validated['country'] ?? null,
                 'timezone' => $validated['timezone'] ?? 'UTC',
                 'status' => 'trial',
-                'trial_ends_at' => now()->addDays(self::TRIAL_DAYS),
+                'trial_ends_at' => now()->addDays((int) config('billing.trial_days', self::TRIAL_DAYS)),
             ]);
 
             $user = User::create([
@@ -90,6 +90,11 @@ class AuthController extends ApiController
             throw ValidationException::withMessages([
                 'email' => ['The provided credentials are incorrect.'],
             ]);
+        }
+
+        // Console-only accounts have no workspace to land in.
+        if ($user->isSuperAdmin() && !$user->businesses()->wherePivot('status', 'active')->exists()) {
+            return $this->errorResponse('This is an administrator account. Sign in at /admin/login instead.', 403);
         }
 
         $token = $user->createToken($validated['device_name'] ?? 'web')->plainTextToken;
