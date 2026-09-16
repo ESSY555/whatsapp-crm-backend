@@ -135,24 +135,54 @@ class BillingAndAdminTest extends TestCase
         $this->actingAs($admin)->getJson('/api/v1/auth/user')->assertJsonPath('data.is_super_admin', true);
     }
 
-    public function test_admin_login_only_accepts_super_admins(): void
+    public function test_admin_login_only_accepts_the_configured_super_admin(): void
     {
-        [$user] = $this->membership();
-        $admin = $this->superAdmin();
+        config(['billing.super_admin.email' => 'admin@example.com', 'billing.super_admin.password' => 'console-secret']);
+        $admin = User::factory()->create(['email' => 'admin@example.com', 'password' => 'console-secret']);
+        $admin->forceFill(['is_super_admin' => true])->save();
+        [$owner] = $this->membership();
+        $otherFlagged = $this->superAdmin(); // flagged in the DB, but not the configured identity
 
-        $this->postJson('/api/v1/auth/admin/login', ['email' => $user->email, 'password' => 'wrong'])
+        $incorrect = fn (array $body) => $this->postJson('/api/v1/auth/admin/login', $body)
             ->assertUnprocessable()->assertJsonValidationErrors('email');
-        $this->postJson('/api/v1/auth/admin/login', ['email' => $user->email, 'password' => 'password'])
-            ->assertForbidden()->assertJsonPath('message', 'This account does not have administrator access.');
 
-        $res = $this->postJson('/api/v1/auth/admin/login', ['email' => $admin->email, 'password' => 'password'])->assertOk();
-        $res->assertJsonPath('data.user.is_super_admin', true);
+        // Wrong password for the configured email.
+        $incorrect(['email' => 'admin@example.com', 'password' => 'wrong-secret']);
+        // A business owner with a valid database password.
+        $incorrect(['email' => $owner->email, 'password' => 'password']);
+        // Another user flagged is_super_admin with a valid database password.
+        $incorrect(['email' => $otherFlagged->email, 'password' => 'password']);
+        // The configured password used with someone else's email.
+        $incorrect(['email' => $owner->email, 'password' => 'console-secret']);
+        $this->assertDatabaseCount('personal_access_tokens', 0);
+
+        // Only the configured pair signs in (email is case-insensitive).
+        $res = $this->postJson('/api/v1/auth/admin/login', ['email' => 'Admin@Example.com', 'password' => 'console-secret'])->assertOk();
+        $res->assertJsonPath('data.user.id', $admin->id)->assertJsonPath('data.user.is_super_admin', true);
         $this->assertDatabaseHas('personal_access_tokens', ['tokenable_id' => $admin->id, 'name' => 'admin-console']);
-
         $this->withToken($res->json('data.token'))->getJson('/api/v1/admin/dashboard')->assertOk();
 
+        // A super-admin token from the *business* login cannot reach the console API.
+        $workspaceAdmin = $this->superAdmin();
+        $workspaceAdmin->businesses()->attach($this->membership()[1]->id, ['role' => 'owner', 'status' => 'active']);
+        $businessToken = $this->postJson('/api/v1/auth/login', ['email' => $workspaceAdmin->email, 'password' => 'password'])->assertOk()->json('data.token');
+        $this->app['auth']->forgetGuards();
+        $this->withToken($businessToken)->getJson('/api/v1/admin/dashboard')->assertForbidden();
+        $this->withToken($businessToken)->getJson('/api/v1/business')->assertOk();
+        $this->app['auth']->forgetGuards();
+
+        // Configured credentials without a matching super admin row are refused.
+        $admin->forceFill(['is_super_admin' => false])->save();
+        $this->postJson('/api/v1/auth/admin/login', ['email' => 'admin@example.com', 'password' => 'console-secret'])
+            ->assertForbidden()->assertJsonPath('message', 'This account does not have administrator access.');
+
+        // Nothing configured means nobody can use the console endpoint.
+        config(['billing.super_admin.email' => null, 'billing.super_admin.password' => null]);
+        $incorrect(['email' => 'admin@example.com', 'password' => 'console-secret']);
+
         // A console-only admin (no business) is sent to the admin login by the business login.
-        $this->postJson('/api/v1/auth/login', ['email' => $admin->email, 'password' => 'password'])
+        $admin->forceFill(['is_super_admin' => true])->save();
+        $this->postJson('/api/v1/auth/login', ['email' => 'admin@example.com', 'password' => 'console-secret'])
             ->assertForbidden()->assertJsonPath('message', 'This is an administrator account. Sign in at /admin/login instead.');
     }
 

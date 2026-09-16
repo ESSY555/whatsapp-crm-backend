@@ -6,6 +6,7 @@ use App\Http\Requests\Auth\ForgotPasswordRequest;
 use App\Http\Requests\Auth\LoginRequest;
 use App\Http\Requests\Auth\RegisterRequest;
 use App\Http\Requests\Auth\ResetPasswordRequest;
+use App\Http\Middleware\EnsureSuperAdmin;
 use App\Models\Business;
 use App\Models\BusinessSetting;
 use App\Models\User;
@@ -111,19 +112,30 @@ class AuthController extends ApiController
     {
         $validated = $request->validated();
 
-        $user = User::where('email', $validated['email'])->first();
+        // The console accepts exactly one identity: the Super Admin configured
+        // in .env (SUPER_ADMIN_EMAIL / SUPER_ADMIN_PASSWORD). Nothing in the
+        // users table — not even another account flagged is_super_admin — can
+        // authenticate here, so a leaked business password never reaches /admin.
+        $configuredEmail = (string) config('billing.super_admin.email');
+        $configuredPassword = (string) config('billing.super_admin.password');
 
-        if (!$user || !Hash::check($validated['password'], $user->password)) {
+        $emailMatches = $configuredEmail !== '' && hash_equals(strtolower($configuredEmail), strtolower((string) $validated['email']));
+        $passwordMatches = $configuredPassword !== '' && hash_equals($configuredPassword, (string) $validated['password']);
+
+        if (!$emailMatches || !$passwordMatches) {
             throw ValidationException::withMessages([
                 'email' => ['The provided credentials are incorrect.'],
             ]);
         }
 
-        if (!$user->isSuperAdmin()) {
+        // The matching database row must exist and carry the super admin flag
+        // (SuperAdminSeeder creates it); anything else is a misconfiguration.
+        $user = User::query()->whereRaw('LOWER(email) = ?', [strtolower($configuredEmail)])->first();
+        if (!$user || !$user->isSuperAdmin()) {
             return $this->errorResponse('This account does not have administrator access.', 403);
         }
 
-        $token = $user->createToken('admin-console')->plainTextToken;
+        $token = $user->createToken(EnsureSuperAdmin::TOKEN_NAME)->plainTextToken;
 
         return $this->successResponse('Successfully logged in.', $this->authPayload($user, $token));
     }
