@@ -78,7 +78,7 @@ class CustomerController extends ApiController
     {
         return response($importer->template(), 200, [
             'Content-Type' => 'text/csv; charset=UTF-8',
-            'Content-Disposition' => 'attachment; filename="flowcrm-customers-template.csv"',
+            'Content-Disposition' => 'attachment; filename="crediping-customers-template.csv"',
         ]);
     }
 

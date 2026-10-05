@@ -12,11 +12,27 @@ class MessageTemplate extends Model
 
     public const STATUSES = ['draft', 'pending', 'approved', 'rejected', 'disabled'];
 
-    protected $fillable = ['name', 'category', 'language', 'content', 'whatsapp_template_id', 'status', 'variables'];
+    protected $fillable = ['name', 'category', 'language', 'content', 'whatsapp_template_id', 'meta_template_id', 'status', 'rejection_reason', 'is_platform', 'variables'];
 
     protected function casts(): array
     {
-        return ['variables' => 'array'];
+        return ['variables' => 'array', 'is_platform' => 'boolean'];
+    }
+
+    /**
+     * The body as Meta wants it: named placeholders become positional
+     * {{1}}, {{2}}… in order of first appearance, matching the parameter
+     * order WhatsAppCloudApi sends.
+     */
+    public function metaBody(): string
+    {
+        $index = array_flip($this->placeholders());
+
+        return preg_replace_callback(
+            '/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/',
+            fn ($m) => '{{' . (($index[$m[1]] ?? 0) + 1) . '}}',
+            $this->content,
+        );
     }
 
     public function reminderRules(): HasMany

@@ -28,7 +28,7 @@ class SuperAdminSeeder extends Seeder
 
         $user = User::query()->firstOrNew(['email' => $email]);
         $user->forceFill([
-            'name' => $user->name ?: (string) config('billing.super_admin.name', 'FlowCRM Admin'),
+            'name' => $user->name ?: (string) config('billing.super_admin.name', 'Crediping Admin'),
             'password' => Hash::make($password),
             'is_super_admin' => true,
             'email_verified_at' => $user->email_verified_at ?? now(),

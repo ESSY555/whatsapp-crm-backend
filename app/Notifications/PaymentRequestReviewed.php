@@ -37,8 +37,8 @@ class PaymentRequestReviewed extends Notification implements ShouldQueue
                 ->subject("Your {$plan} plan is now active")
                 ->greeting("Hi {$notifiable->name},")
                 ->line("We received your payment and your {$plan} plan is now active" . ($subscription ? ' until ' . $subscription->ends_at->format('M d, Y') : '') . '.')
-                ->action('Open FlowCRM', $url)
-                ->line('Thank you for using FlowCRM.');
+                ->action('Open Crediping', $url)
+                ->line('Thank you for using Crediping.');
         }
 
         return (new MailMessage)

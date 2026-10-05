@@ -404,11 +404,11 @@ class BillingAndAdminTest extends TestCase
 
         // Bank accounts show up for businesses.
         $accountId = $this->actingAs($admin)->postJson('/api/v1/admin/bank-accounts', [
-            'bank_name' => 'GTBank', 'account_name' => 'FlowCRM Ltd', 'account_number' => '0123456789', 'currency' => 'NGN',
+            'bank_name' => 'GTBank', 'account_name' => 'Crediping Ltd', 'account_number' => '0123456789', 'currency' => 'NGN',
         ])->assertCreated()->json('data.id');
         $this->actingAs($user)->getJson('/api/v1/billing')->assertJsonPath('data.bank_accounts.0.account_number', '0123456789');
         $this->actingAs($admin)->putJson("/api/v1/admin/bank-accounts/{$accountId}", [
-            'bank_name' => 'GTBank', 'account_name' => 'FlowCRM Ltd', 'account_number' => '0123456789', 'currency' => 'NGN', 'is_active' => false,
+            'bank_name' => 'GTBank', 'account_name' => 'Crediping Ltd', 'account_number' => '0123456789', 'currency' => 'NGN', 'is_active' => false,
         ])->assertOk();
         $this->actingAs($user)->getJson('/api/v1/billing')->assertJsonCount(0, 'data.bank_accounts');
 

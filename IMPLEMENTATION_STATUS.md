@@ -1,6 +1,6 @@
-# FlowCRM backend — PRD implementation status
+# Crediping backend — PRD implementation status
 
-Maps every section of `PRD.md` to what exists in this repository. All items below are implemented and covered by the automated test suite (`php artisan test`, 108 tests / 782 assertions) unless marked otherwise.
+Maps every section of `PRD.md` to what exists in this repository. All items below are implemented and covered by the automated test suite (`php artisan test`, 115 tests / 875 assertions) unless marked otherwise.
 
 ## Architecture & tenancy (PRD §2–7, §33–36, §55–57)
 
@@ -65,6 +65,24 @@ v1 has **no payment processor**: a business transfers to the platform's bank acc
 Tests: `tests/Feature/Api/V1/MessageQuotaTest.php` (delivery-based charging, failed messages not charged, exhaustion hard-block + in-flight reservation, overage mode, marketing isolation, authentication pool, service window, period rollover, active→grace→expired access rules, stacked renewal) and `BillingAndAdminTest.php` (receipt upload/validation, roles, admin approve/decline/renewal stacking, expiry command, admin management, impersonation, admin login).
 
 Not built in this pass (by spec): processor checkout/webhooks, metered overage invoices, changes to WhatsApp onboarding.
+
+## WhatsApp onboarding — "Connect WhatsApp" (Meta Embedded Signup, added 2026-09-16)
+
+Every business connects **its own** WhatsApp Business number; there is no shared platform number, so each business has a private inbox, its own 24-hour service windows and its own quality rating. The user only sees a button and Meta's popup (Facebook login → business name → phone number + OTP, or a QR scan for numbers already on the WhatsApp Business app via Coexistence). Nothing technical is shown or typed.
+
+| Piece | Implementation |
+| --- | --- |
+| Platform config (yours, once) | `config/services.php` `whatsapp.*`: `app_id`, `app_secret`, `verify_token`, `graph_url`, `embedded_signup_config_id`, `platform_token` (System User token of the platform business), `credit_line_id` + currency, `manual_connect` (dev only). `GET /whatsapp/signup-config` tells the frontend whether the button is available. |
+| Connect flow | `POST /whatsapp/embedded-signup` `{code, waba_id?, phone_number_id?}` (owner only) → `WhatsAppOnboardingService::connect()`: exchange code → business token; find the number on the WABA; `subscribed_apps` (webhook); `/register` with a generated two-step PIN (stored encrypted); attach the WABA to the platform **credit line** (business never sees Meta billing); store `whatsapp_connections` (`onboarding_source = embedded`, display number, verified name, quality, tier); submit the **platform template library** (`config/whatsapp_templates.php`, Utility category) to the WABA and mirror them as the business's templates (`is_platform`). Billing/template steps are best-effort with `last_error` + `POST /whatsapp/connections/{id}/retry-setup`. One number can belong to one workspace. |
+| Graph client | `WhatsAppCloudApi`: `exchangeCode`, `grantedWabaIds` (debug_token), `wabaPhoneNumbers`, `phoneNumber`, `subscribeApp`, `registerPhone`, `attachCreditLine`, `createTemplate`, `templates`; base URL read per call. |
+| Templates | `MessageTemplate::metaBody()` converts `{{customer_name}}`-style placeholders to Meta's positional `{{1}}…` in first-appearance order (matching the parameter order used when sending). `message_template_status_update` webhooks flip `status` / `rejection_reason`. |
+| Account webhooks | `ProcessWhatsAppWebhook` routes `messages` by `metadata.phone_number_id` and account-level fields by `entry.id` (WABA): template status, `phone_number_quality_update` (tier + FLAGGED→RED with notification), `account_update` (restriction → connection `error`, sending blocked). |
+| Manual fallback | `POST /whatsapp/connections` only when `WHATSAPP_MANUAL_CONNECT=true` (local development); marked `onboarding_source = manual`. |
+| Frontend | `src/components/whatsapp-connect.tsx`: "Connect your WhatsApp Business" card → loads the Facebook JS SDK on demand, `FB.login` with the Embedded Signup `config_id`, captures the `WA_EMBEDDED_SIGNUP` postMessage ids, posts the code; connected state shows verified name, number, quality, daily tier, template approval progress, "Finish setup" (retry), "Check connection", "Disconnect". |
+
+Prerequisites on the platform side before the button works for real users: Meta Business Verification, App Review for `whatsapp_business_management` + `whatsapp_business_messaging`, Tech Provider status, an Embedded Signup configuration (`config_id`), a credit line, and a public HTTPS webhook (`/api/v1/webhooks/whatsapp`) subscribed to `messages`, `message_template_status_update`, `phone_number_quality_update`, `account_update`.
+
+Tests: `tests/Feature/Api/V1/WhatsAppEmbeddedSignupTest.php` (config availability, full connect sequence against a faked Graph API incl. token/PIN/credit-line/template assertions, best-effort failures + retry, bad code / unconfigured / claimed number / role checks, manual gating, account-level webhooks).
 
 ## Scheduler
 

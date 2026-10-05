@@ -209,8 +209,8 @@ class WhatsAppMessagingTest extends TestCase
             'statuses' => [['id' => 'wamid.out', 'status' => 'read']],
         ]]]]]];
 
-        (new ProcessWhatsAppWebhook($payload))->handle(app(\App\Services\WhatsAppService::class));
-        (new ProcessWhatsAppWebhook($payload))->handle(app(\App\Services\WhatsAppService::class));
+        (new ProcessWhatsAppWebhook($payload))->handle(app(\App\Services\WhatsAppService::class), app(\App\Services\WhatsAppOnboardingService::class));
+        (new ProcessWhatsAppWebhook($payload))->handle(app(\App\Services\WhatsAppService::class), app(\App\Services\WhatsAppOnboardingService::class));
 
         $this->assertSame(1, Message::withoutGlobalScopes()->where('whatsapp_message_id', 'wamid.in')->count());
         $this->assertDatabaseHas('messages', ['whatsapp_message_id' => 'wamid.in', 'direction' => 'inbound', 'customer_id' => $customer->id, 'body' => 'Paid today', 'business_id' => $business->id]);
@@ -218,16 +218,16 @@ class WhatsAppMessagingTest extends TestCase
 
         // A late "delivered" status must not downgrade "read"; "failed" is recorded with its reason.
         $late = ['entry' => [['changes' => [['value' => ['metadata' => ['phone_number_id' => 'phone-9'], 'statuses' => [['id' => 'wamid.out', 'status' => 'delivered']]]]]]]];
-        (new ProcessWhatsAppWebhook($late))->handle(app(\App\Services\WhatsAppService::class));
+        (new ProcessWhatsAppWebhook($late))->handle(app(\App\Services\WhatsAppService::class), app(\App\Services\WhatsAppOnboardingService::class));
         $this->assertDatabaseHas('messages', ['id' => $outbound['id'], 'status' => 'read']);
 
         $failed = ['entry' => [['changes' => [['value' => ['metadata' => ['phone_number_id' => 'phone-9'], 'statuses' => [['id' => 'wamid.out', 'status' => 'failed', 'errors' => [['title' => 'Number not on WhatsApp']]]]]]]]]];
-        (new ProcessWhatsAppWebhook($failed))->handle(app(\App\Services\WhatsAppService::class));
+        (new ProcessWhatsAppWebhook($failed))->handle(app(\App\Services\WhatsAppService::class), app(\App\Services\WhatsAppOnboardingService::class));
         $this->assertDatabaseHas('messages', ['id' => $outbound['id'], 'status' => 'failed', 'error_message' => 'Number not on WhatsApp']);
         $this->assertSame(1, Notification::withoutGlobalScopes()->where('business_id', $business->id)->where('type', 'message_failed')->count());
 
         // Unknown phone ids are ignored.
-        (new ProcessWhatsAppWebhook(['entry' => [['changes' => [['value' => ['metadata' => ['phone_number_id' => 'nope'], 'messages' => [['from' => '1', 'id' => 'x']]]]]]]]))->handle(app(\App\Services\WhatsAppService::class));
+        (new ProcessWhatsAppWebhook(['entry' => [['changes' => [['value' => ['metadata' => ['phone_number_id' => 'nope'], 'messages' => [['from' => '1', 'id' => 'x']]]]]]]]))->handle(app(\App\Services\WhatsAppService::class), app(\App\Services\WhatsAppOnboardingService::class));
         $this->assertDatabaseMissing('messages', ['whatsapp_message_id' => 'x']);
     }
 

@@ -1,9 +1,9 @@
-# FlowCRM
+# Crediping
 
 ## Multi-Tenant Backend Product Requirements Document
 
 **Version:** 1.0
-**Product:** FlowCRM
+**Product:** Crediping
 **Backend:** PHP 8.2+ / Laravel 12
 **Database:** MySQL 8+
 **Architecture:** Multi-Tenant SaaS
@@ -17,9 +17,9 @@
 
 # 1. Backend Objective
 
-Build a production-ready, multi-tenant Laravel backend for FlowCRM.
+Build a production-ready, multi-tenant Laravel backend for Crediping.
 
-FlowCRM allows manufacturers, distributors, wholesalers, and SMEs to manage:
+Crediping allows manufacturers, distributors, wholesalers, and SMEs to manage:
 
 * Businesses
 * Users
@@ -40,7 +40,7 @@ FlowCRM allows manufacturers, distributors, wholesalers, and SMEs to manage:
 * Business settings
 * WhatsApp Business integrations
 
-The backend must provide a secure REST API consumed by the FlowCRM frontend.
+The backend must provide a secure REST API consumed by the Crediping frontend.
 
 ---
 
@@ -48,14 +48,14 @@ The backend must provide a secure REST API consumed by the FlowCRM frontend.
 
 ## 2.1 Tenancy Model
 
-FlowCRM will use:
+Crediping will use:
 
 > **Shared database + shared schema + business-level tenant isolation**
 
 Example:
 
 ```text
-                    FlowCRM
+                    Crediping
                        │
               ┌────────┴────────┐
               │                 │
@@ -385,7 +385,7 @@ This architecture is preferable if a user may eventually belong to multiple busi
 
 For MVP, if each user can belong to exactly one business, `business_id` on `users` is acceptable.
 
-However, **I recommend `business_users` now** if FlowCRM is intended to become a serious SaaS product.
+However, **I recommend `business_users` now** if Crediping is intended to become a serious SaaS product.
 
 It prevents an expensive migration later when users need access to multiple businesses.
 
@@ -1742,7 +1742,7 @@ Sensitive configuration must use `.env`.
 Examples:
 
 ```env
-APP_NAME=FlowCRM
+APP_NAME=Crediping
 APP_ENV=local
 APP_KEY=
 

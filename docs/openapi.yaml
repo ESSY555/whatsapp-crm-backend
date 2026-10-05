@@ -1,9 +1,9 @@
 openapi: 3.0.3
 info:
-  title: FlowCRM API
+  title: Crediping API
   version: "1.0"
   description: |
-    Multi-tenant REST API for FlowCRM (customers, invoices, payments, WhatsApp messaging,
+    Multi-tenant REST API for Crediping (customers, invoices, payments, WhatsApp messaging,
     broadcasts, automated reminders, reports, notifications and audit logs).
 
     **Authentication** – Bearer token issued by `POST /auth/login` or `POST /auth/register`

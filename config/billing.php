@@ -28,7 +28,7 @@ return [
     | Set in .env; never commit real values.
     */
     'super_admin' => [
-        'name' => env('SUPER_ADMIN_NAME', 'FlowCRM Admin'),
+        'name' => env('SUPER_ADMIN_NAME', 'Crediping Admin'),
         'email' => env('SUPER_ADMIN_EMAIL'),
         'password' => env('SUPER_ADMIN_PASSWORD'),
     ],

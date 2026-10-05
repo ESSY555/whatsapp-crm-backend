@@ -86,12 +86,17 @@ Route::prefix('v1')->group(function () {
         Route::post('payments/{payment}/reverse', [PaymentController::class, 'reverse'])->middleware('business.role:owner');
 
         // WhatsApp
+        Route::get('whatsapp/signup-config', [WhatsAppConnectionController::class, 'signupConfig']);
+        Route::post('whatsapp/embedded-signup', [WhatsAppConnectionController::class, 'embeddedSignup'])
+            ->middleware(['business.role:owner', 'throttle:10,1']);
         Route::apiResource('whatsapp/connections', WhatsAppConnectionController::class)
             ->only(['index', 'store', 'destroy'])
             ->parameters(['connections' => 'connection'])
             ->middleware('business.role:owner,manager');
         Route::post('whatsapp/connections/{connection}/verify', [WhatsAppConnectionController::class, 'verify'])
             ->middleware(['business.role:owner,manager', 'throttle:10,1']);
+        Route::post('whatsapp/connections/{connection}/retry-setup', [WhatsAppConnectionController::class, 'retrySetup'])
+            ->middleware(['business.role:owner', 'throttle:5,1']);
 
         Route::apiResource('whatsapp/templates', MessageTemplateController::class)->parameters(['templates' => 'template']);
         Route::apiResource('templates', MessageTemplateController::class)->parameters(['templates' => 'template'])->names('templates.alias');

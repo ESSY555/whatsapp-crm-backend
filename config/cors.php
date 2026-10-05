@@ -3,7 +3,7 @@
 return [
 
     /*
-    | Cross-Origin Resource Sharing. The API is consumed by the FlowCRM
+    | Cross-Origin Resource Sharing. The API is consumed by the Crediping
     | frontend with bearer tokens, so credentials are not needed and the
     | allowed origins are restricted to the configured frontend URL(s).
     */

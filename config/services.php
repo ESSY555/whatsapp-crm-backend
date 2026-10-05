@@ -40,6 +40,21 @@ return [
         'app_id' => env('WHATSAPP_APP_ID'),
         'app_secret' => env('WHATSAPP_APP_SECRET'),
         'graph_url' => env('WHATSAPP_GRAPH_URL', 'https://graph.facebook.com/v20.0'),
+
+        /*
+        | Embedded Signup ("Connect WhatsApp" button). Businesses never see
+        | Meta's console: the popup returns a code, the backend does the rest.
+        | config_id comes from the Embedded Signup configuration on the Meta
+        | app; the platform token is a System User token of the platform's
+        | own Meta Business (used for credit-line sharing).
+        */
+        'embedded_signup_config_id' => env('WHATSAPP_EMBEDDED_SIGNUP_CONFIG_ID'),
+        'platform_token' => env('WHATSAPP_PLATFORM_TOKEN'),
+        'credit_line_id' => env('WHATSAPP_CREDIT_LINE_ID'),
+        'credit_line_currency' => env('WHATSAPP_CREDIT_LINE_CURRENCY', 'NGN'),
+        // Local development only: lets owners paste a phone number id + token
+        // by hand instead of going through Embedded Signup.
+        'manual_connect' => (bool) env('WHATSAPP_MANUAL_CONNECT', false),
     ],
 
 ];

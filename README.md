@@ -1,6 +1,6 @@
-# FlowCRM API
+# Crediping API
 
-Multi-tenant Laravel 12 backend for FlowCRM — customers, invoices, payments, debt collection and WhatsApp messaging for SMEs. The product requirements live in [PRD.md](PRD.md); [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) maps every PRD section to the code that implements it.
+Multi-tenant Laravel 12 backend for Crediping — customers, invoices, payments, debt collection and WhatsApp messaging for SMEs. The product requirements live in [PRD.md](PRD.md); [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) maps every PRD section to the code that implements it.
 
 ## Requirements
 
