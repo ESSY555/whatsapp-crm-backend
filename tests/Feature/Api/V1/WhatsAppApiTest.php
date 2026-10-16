@@ -27,13 +27,22 @@ class WhatsAppApiTest extends TestCase
 
     public function test_webhook_is_verified_and_processing_is_queued(): void
     {
-        config(['services.whatsapp.verify_token' => 'verify-me']);
-        $this->get('/api/v1/webhooks/whatsapp?hub_verify_token=verify-me&hub_challenge=challenge')
+        config(['services.whatsapp.verify_token' => 'verify-me', 'services.whatsapp.app_secret' => 'test-secret']);
+        $this->get('/api/v1/webhooks/whatsapp?hub_mode=subscribe&hub_verify_token=verify-me&hub_challenge=challenge')
             ->assertOk()->assertSee('challenge');
         $this->get('/api/v1/webhooks/whatsapp?hub_verify_token=wrong&hub_challenge=challenge')->assertForbidden();
 
         Queue::fake();
-        $this->postJson('/api/v1/webhooks/whatsapp', ['entry' => []])->assertAccepted();
+
+        // Unsigned request is rejected with 401
+        $payload = json_encode(['object' => 'whatsapp_business_account', 'entry' => []]);
+        $this->call('POST', '/api/v1/webhooks/whatsapp', [], [], [], ['CONTENT_TYPE' => 'application/json'], $payload)->assertStatus(401);
+        Queue::assertNothingPushed();
+
+        // Valid signature is accepted with 200 OK
+        $signature = 'sha256=' . hash_hmac('sha256', $payload, 'test-secret');
+        $this->call('POST', '/api/v1/webhooks/whatsapp', [], [], [], ['CONTENT_TYPE' => 'application/json', 'HTTP_X_HUB_SIGNATURE_256' => $signature], $payload)
+            ->assertStatus(200);
         Queue::assertPushed(ProcessWhatsAppWebhook::class);
     }
 

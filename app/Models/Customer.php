@@ -36,11 +36,60 @@ class Customer extends Model
     public function messages(): HasMany { return $this->hasMany(Message::class); }
 
     /**
+     * Digits-only canonical phone in international format, as expected by the WhatsApp Cloud API.
+     * Correctly handles Nigerian formats (080..., 80..., +234..., 234...) to canonical 234...
+     * while preserving valid international numbers.
+     */
+    public static function normalizePhone(?string $phone): ?string
+    {
+        if ($phone === null) {
+            return null;
+        }
+
+        $trimmed = trim($phone);
+        if ($trimmed === '') {
+            return null;
+        }
+
+        $digits = preg_replace('/\D+/', '', $trimmed);
+        if ($digits === '') {
+            return null;
+        }
+
+        // Strip leading international call prefix "00"
+        if (str_starts_with($digits, '00')) {
+            $digits = substr($digits, 2);
+        }
+
+        // Nigerian local format with leading zero: 11 digits starting with 0 (e.g. 08031234567, 070..., 090..., 081..., 091...)
+        if (strlen($digits) === 11 && str_starts_with($digits, '0')) {
+            return '234' . substr($digits, 1);
+        }
+
+        // Nigerian 10-digit format without leading zero (e.g. 8031234567, 703..., 901...)
+        if (strlen($digits) === 10 && in_array($digits[0], ['7', '8', '9'], true)) {
+            return '234' . $digits;
+        }
+
+        // Nigerian number entered with 234 and accidental local 0: 23408031234567 (14 digits)
+        if (strlen($digits) === 14 && str_starts_with($digits, '2340')) {
+            return '234' . substr($digits, 4);
+        }
+
+        // Standard Nigerian international format (13 digits starting with 234)
+        if (strlen($digits) === 13 && str_starts_with($digits, '234')) {
+            return $digits;
+        }
+
+        // Valid international numbers
+        return $digits;
+    }
+
+    /**
      * Digits-only phone in international format, as expected by the WhatsApp Cloud API.
      */
     public function whatsappNumber(): ?string
     {
-        $digits = preg_replace('/\D+/', '', (string) $this->phone);
-        return $digits !== '' ? $digits : null;
+        return self::normalizePhone($this->phone);
     }
 }

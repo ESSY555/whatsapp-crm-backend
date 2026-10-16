@@ -40,11 +40,13 @@ class WhatsAppCloudApi
                 ->post("{$this->baseUrl()}/{$connection->phone_number_id}/messages", $payload)
                 ->throw();
         } catch (RequestException $e) {
-            $error = $e->response->json('error') ?? [];
+            $error = $e->response?->json('error') ?? [];
+            $retryAfter = $e->response?->header('Retry-After');
             throw new WhatsAppApiException(
                 $error['message'] ?? $e->getMessage(),
-                (int) ($error['code'] ?? $e->response->status()),
-                $e->response->status(),
+                (int) ($error['code'] ?? ($e->response ? $e->response->status() : 0)),
+                $e->response ? $e->response->status() : 0,
+                $retryAfter !== null && is_numeric($retryAfter) ? (int) $retryAfter : null,
             );
         }
 
@@ -209,11 +211,13 @@ class WhatsAppCloudApi
         try {
             return $request()->throw();
         } catch (RequestException $e) {
-            $error = $e->response->json('error') ?? [];
+            $error = $e->response?->json('error') ?? [];
+            $retryAfter = $e->response?->header('Retry-After');
             throw new WhatsAppApiException(
                 $error['message'] ?? $e->getMessage(),
-                (int) ($error['code'] ?? $e->response->status()),
-                $e->response->status(),
+                (int) ($error['code'] ?? ($e->response ? $e->response->status() : 0)),
+                $e->response ? $e->response->status() : 0,
+                $retryAfter !== null && is_numeric($retryAfter) ? (int) $retryAfter : null,
             );
         }
     }
@@ -255,7 +259,7 @@ class WhatsAppCloudApi
 
 class WhatsAppApiException extends RuntimeException
 {
-    public function __construct(string $message, int $apiCode = 0, public readonly int $httpStatus = 0)
+    public function __construct(string $message, int $apiCode = 0, public readonly int $httpStatus = 0, public readonly ?int $retryAfter = null)
     {
         parent::__construct($message, $apiCode);
     }
@@ -266,5 +270,14 @@ class WhatsAppApiException extends RuntimeException
     public function isCredentialError(): bool
     {
         return in_array($this->httpStatus, [401, 403], true) || in_array($this->getCode(), [190, 10, 200], true);
+    }
+
+    /**
+     * Rate limit or server errors are transient and should trigger queue retries.
+     */
+    public function isTransient(): bool
+    {
+        return in_array($this->httpStatus, [429, 500, 502, 503, 504], true)
+            || in_array($this->getCode(), [130429, 131056, 131051, 131052, 131053, 1, 2], true);
     }
 }

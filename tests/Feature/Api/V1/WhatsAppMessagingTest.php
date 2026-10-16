@@ -190,7 +190,7 @@ class WhatsAppMessagingTest extends TestCase
         Queue::assertNothingPushed();
 
         $signature = 'sha256=' . hash_hmac('sha256', $payload, 'app-secret');
-        $this->call('POST', '/api/v1/webhooks/whatsapp', [], [], [], ['CONTENT_TYPE' => 'application/json', 'HTTP_X_HUB_SIGNATURE_256' => $signature], $payload)->assertStatus(202);
+        $this->call('POST', '/api/v1/webhooks/whatsapp', [], [], [], ['CONTENT_TYPE' => 'application/json', 'HTTP_X_HUB_SIGNATURE_256' => $signature], $payload)->assertStatus(200);
         Queue::assertPushed(ProcessWhatsAppWebhook::class);
     }
 

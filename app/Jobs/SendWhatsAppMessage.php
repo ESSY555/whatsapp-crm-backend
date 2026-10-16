@@ -3,6 +3,8 @@
 namespace App\Jobs;
 
 use App\Models\Message;
+use App\Models\ReminderLog;
+use App\Models\ScheduledMessage;
 use App\Services\BroadcastService;
 use App\Services\NotificationService;
 use App\Services\QuotaService;
@@ -16,17 +18,19 @@ use Throwable;
 
 /**
  * Delivers one queued outbound message through the WhatsApp Cloud API.
- * Safe to retry: a message that already left the "queued" state is skipped.
+ * Safe to retry: respects tries and backoff, handles transient network/429 errors.
  */
 class SendWhatsAppMessage implements ShouldQueue
 {
     use Queueable;
 
+    public int $timeout = 60;
     public int $tries = 3;
     public int $backoff = 30;
 
     public function __construct(public int $messageId)
     {
+        $this->onQueue('whatsapp');
     }
 
     public function handle(WhatsAppCloudApi $api, NotificationService $notifications): void
@@ -37,7 +41,21 @@ class SendWhatsAppMessage implements ShouldQueue
         }
 
         TenantManager::runAs($message->business_id, function () use ($message, $api, $notifications) {
-            if ($message->status !== 'queued' || $message->direction !== 'outbound') {
+            // Already delivered or sent to WhatsApp
+            if (in_array($message->status, ['sent', 'delivered', 'read'], true) || $message->direction !== 'outbound') {
+                return;
+            }
+
+            // If a previous attempt already obtained a WhatsApp message ID, avoid resending
+            if (!empty($message->whatsapp_message_id)) {
+                $message->update(['status' => 'sent']);
+                return;
+            }
+
+            // On initial attempt (attempts <= 1), status must be 'queued'.
+            // On subsequent attempts (attempts > 1), status may already be 'sending'.
+            $allowedStatuses = $this->attempts() > 1 ? ['queued', 'sending'] : ['queued'];
+            if (!in_array($message->status, $allowedStatuses, true)) {
                 return;
             }
 
@@ -53,7 +71,17 @@ class SendWhatsAppMessage implements ShouldQueue
                 return;
             }
 
-            $message->update(['status' => 'sending']);
+            // Atomically mark sending
+            if ($message->status !== 'sending') {
+                $affected = Message::whereKey($message->id)
+                    ->where('status', 'queued')
+                    ->update(['status' => 'sending']);
+
+                if ($affected === 0 && $this->attempts() === 1) {
+                    return; // Another worker claimed this message
+                }
+                $message->status = 'sending';
+            }
 
             try {
                 $waId = $api->send($connection, $to, $message);
@@ -64,15 +92,48 @@ class SendWhatsAppMessage implements ShouldQueue
                     'error_message' => null,
                 ]);
                 $connection->update(['last_verified_at' => now()]);
-                // Quota is charged on the delivered webhook, not here.
+
+                if (!empty($message->metadata['scheduled_message_id'])) {
+                    ScheduledMessage::withoutGlobalScopes()
+                        ->whereKey($message->metadata['scheduled_message_id'])
+                        ->update(['status' => 'sent', 'sent_at' => now(), 'error_message' => null]);
+                }
+                if (!empty($message->metadata['reminder_rule_id'])) {
+                    ReminderLog::withoutGlobalScopes()
+                        ->where('message_id', $message->id)
+                        ->update(['status' => 'sent', 'sent_at' => now()]);
+                }
             } catch (WhatsAppApiException $e) {
                 if ($e->isCredentialError()) {
                     $connection->update(['status' => 'error']);
                     $notifications->connectionFailure($connection, $e->getMessage());
+                    $this->fail($message, $e->getMessage(), $notifications);
+                    return;
                 }
+
+                if ($e->isTransient()) {
+                    if ($this->attempts() < $this->tries) {
+                        Log::warning("Transient WhatsApp send failure for message {$message->id} (attempt {$this->attempts()}): {$e->getMessage()}");
+                        Message::whereKey($message->id)->update(['status' => 'queued']);
+                        $message->status = 'queued';
+                        $delay = $e->retryAfter ?? ($this->backoff * $this->attempts());
+                        $this->release($delay);
+                        return;
+                    }
+                }
+
                 $this->fail($message, $e->getMessage(), $notifications);
             } catch (Throwable $e) {
-                Log::error("WhatsApp send failed for message {$message->id}: {$e->getMessage()}");
+                if ($this->attempts() < $this->tries) {
+                    Log::warning("Network/system error sending WhatsApp message {$message->id} (attempt {$this->attempts()}): {$e->getMessage()}");
+                    Message::whereKey($message->id)->update(['status' => 'queued']);
+                    $message->status = 'queued';
+                    $delay = $this->backoff * $this->attempts();
+                    $this->release($delay);
+                    return;
+                }
+
+                Log::error("WhatsApp send failed for message {$message->id} after {$this->attempts()} attempts: {$e->getMessage()}");
                 $this->fail($message, 'Network error while contacting WhatsApp.', $notifications);
             }
         });
@@ -85,5 +146,18 @@ class SendWhatsAppMessage implements ShouldQueue
         $notifications->messageFailed($message);
         // Keep broadcast recipient rows and counters in step with the failure.
         app(BroadcastService::class)->syncRecipientStatus($message);
+
+        if (!empty($message->metadata['scheduled_message_id'])) {
+            ScheduledMessage::withoutGlobalScopes()
+                ->whereKey($message->metadata['scheduled_message_id'])
+                ->whereIn('status', ['processing', 'scheduled'])
+                ->update(['status' => 'failed', 'failed_at' => now(), 'error_message' => $reason]);
+        }
+
+        if (!empty($message->metadata['reminder_rule_id'])) {
+            ReminderLog::withoutGlobalScopes()
+                ->where('message_id', $message->id)
+                ->update(['status' => 'failed']);
+        }
     }
 }

@@ -158,7 +158,9 @@ class WhatsAppService
     }
 
     /**
-     * Apply a delivery status reported by a webhook. Statuses never move backwards.
+     * Apply a delivery status reported by a webhook. Statuses never move backwards,
+     * but late delivered/read confirmations reconcile messages previously marked failed
+     * due to local network timeouts.
      */
     public function applyStatus(string $whatsappMessageId, string $status, ?string $errorMessage = null): ?Message
     {
@@ -167,17 +169,42 @@ class WhatsAppService
             return null;
         }
 
-        $current = Message::STATUS_RANK[$message->status] ?? 0;
-        if (Message::STATUS_RANK[$status] < $current && $status !== 'failed') {
+        $currentStatus = $message->status;
+
+        // Prevent stale events from regressing higher delivery states:
+        // 1. 'read' cannot be downgraded to 'delivered' or 'sent'.
+        if ($currentStatus === 'read' && in_array($status, ['delivered', 'sent', 'sending', 'queued'], true)) {
+            return $message;
+        }
+
+        // 2. 'delivered' cannot be downgraded to 'sent'.
+        if ($currentStatus === 'delivered' && in_array($status, ['sent', 'sending', 'queued'], true)) {
+            return $message;
+        }
+
+        // 3. 'sent' cannot be regressed to 'sending' or 'queued'.
+        if ($currentStatus === 'sent' && in_array($status, ['sending', 'queued'], true)) {
+            return $message;
+        }
+
+        // Duplicate failed events don't re-trigger failure notifications
+        if ($currentStatus === 'failed' && $status === 'failed') {
+            if ($errorMessage && !$message->error_message) {
+                $message->update(['error_message' => $errorMessage]);
+            }
             return $message;
         }
 
         $updates = ['status' => $status];
         if (in_array($status, ['sent', 'delivered', 'read'], true)) {
             $updates[$status . '_at'] = $message->{$status . '_at'} ?? now();
+            // If reconciling from a timeout failure to confirmed delivery, clear the error message
+            if ($currentStatus === 'failed') {
+                $updates['error_message'] = null;
+            }
         }
         if ($status === 'failed') {
-            $updates['error_message'] = $errorMessage;
+            $updates['error_message'] = $errorMessage ?? $message->error_message;
         }
 
         $message->update($updates);
@@ -188,7 +215,7 @@ class WhatsAppService
             $this->quota->recordDelivered($message);
         }
 
-        if ($status === 'failed') {
+        if ($status === 'failed' && $currentStatus !== 'failed') {
             $this->quota->recordFailed($message);
             $this->notifications->messageFailed($message);
         }
@@ -204,17 +231,23 @@ class WhatsAppService
      */
     public function handleIncoming(WhatsAppConnection $connection, array $incoming): ?Message
     {
-        $from = preg_replace('/\D+/', '', (string) data_get($incoming, 'from'));
+        $from = Customer::normalizePhone((string) data_get($incoming, 'from'));
         $waId = data_get($incoming, 'id');
         if (!$from || !$waId) {
             return null;
         }
 
-        $customer = Customer::query()->where('phone_normalized', $from)->first();
+        $customer = Customer::query()
+            ->where('phone_normalized', $from)
+            ->orWhere('phone', $from)
+            ->orWhere('phone', '+' . $from)
+            ->first();
 
         if (!$customer) {
             // Unknown senders become customers so the conversation is not lost.
             $customer = Customer::create(['name' => '+' . $from, 'phone' => '+' . $from, 'category' => 'walk-in']);
+        } elseif (!$customer->phone_normalized) {
+            $customer->update(['phone_normalized' => $from]);
         }
 
         $conversation = Conversation::query()->firstOrCreate(

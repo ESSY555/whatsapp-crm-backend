@@ -25,6 +25,7 @@ class ProcessWhatsAppWebhook implements ShouldQueue
 
     public function __construct(public array $payload)
     {
+        $this->onQueue('whatsapp');
     }
 
     public function handle(WhatsAppService $service, WhatsAppOnboardingService $onboarding): void
@@ -56,6 +57,20 @@ class ProcessWhatsAppWebhook implements ShouldQueue
         $connection = WhatsAppConnection::withoutGlobalScopes()->where('phone_number_id', $phoneId)->first();
         if (!$connection) {
             Log::warning("WhatsApp webhook for unknown phone_number_id {$phoneId}");
+            return;
+        }
+
+        if (!$connection->isActive()) {
+            Log::info("WhatsApp webhook received for inactive connection {$connection->id} ({$phoneId})");
+            TenantManager::runAs($connection->business_id, function () use ($service, $value) {
+                foreach (data_get($value, 'statuses', []) as $status) {
+                    $service->applyStatus(
+                        (string) data_get($status, 'id'),
+                        (string) data_get($status, 'status'),
+                        data_get($status, 'errors.0.title') ?? data_get($status, 'errors.0.message'),
+                    );
+                }
+            });
             return;
         }
 

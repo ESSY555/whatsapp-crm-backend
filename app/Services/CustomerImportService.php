@@ -75,7 +75,7 @@ class CustomerImportService
                 continue;
             }
 
-            $normalizedPhone = preg_replace('/\D+/', '', (string) ($row['phone'] ?? ''));
+            $normalizedPhone = Customer::normalizePhone((string) ($row['phone'] ?? '')) ?? '';
             if ($normalizedPhone !== '' && isset($seenPhones[$normalizedPhone])) {
                 $summary['skipped']++;
                 $summary['errors'][] = ['row' => $line, 'message' => "Duplicate phone within the file (first seen on row {$seenPhones[$normalizedPhone]})."];

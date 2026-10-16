@@ -17,11 +17,12 @@ class SendBroadcastMessages implements ShouldQueue
 {
     use Queueable;
 
-    public int $timeout = 600;
+    public int $timeout = 180;
     public int $tries = 3;
 
     public function __construct(public int $broadcastId)
     {
+        $this->onQueue('whatsapp_bulk');
     }
 
     public function handle(BroadcastService $service): void
@@ -36,7 +37,7 @@ class SendBroadcastMessages implements ShouldQueue
             $hasMore = $service->processBatch($broadcast->fresh());
 
             if ($hasMore && $broadcast->fresh()->status === 'processing') {
-                self::dispatch($this->broadcastId)->delay(now()->addSeconds(2));
+                self::dispatch($this->broadcastId)->onQueue('whatsapp_bulk')->delay(now()->addSeconds(2));
             }
         });
     }

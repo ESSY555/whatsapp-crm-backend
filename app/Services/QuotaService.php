@@ -194,14 +194,27 @@ class QuotaService
      * Count a message the WhatsApp webhook reported as delivered (or read,
      * which implies delivered). Idempotent per message via charged_at.
      */
-    public function recordDelivered(Message $message): void
+    public function recordDelivered(Message $message): bool
     {
         if ($message->charged_at || $message->direction !== 'outbound') {
-            return;
+            return false;
         }
 
+        // Atomically claim the message for billing. Only the process/worker that
+        // successfully transitions charged_at from NULL to now() proceeds to bump usage.
+        $affected = Message::withoutGlobalScopes()
+            ->whereKey($message->id)
+            ->whereNull('charged_at')
+            ->update(['charged_at' => now()]);
+
+        if ($affected === 0) {
+            return false;
+        }
+
+        $message->charged_at = now();
         $this->bump($message, 'sent_count');
-        $message->forceFill(['charged_at' => now()])->save();
+
+        return true;
     }
 
     public function recordFailed(Message $message): void

@@ -35,13 +35,13 @@ class WhatsAppWebhookController extends ApiController
 
         $payload = $request->all();
         if (($payload['object'] ?? 'whatsapp_business_account') !== 'whatsapp_business_account') {
-            return response()->json(['success' => true], 202);
+            return response()->json(['success' => true], 200);
         }
 
         Log::info('WhatsApp webhook received', ['entries' => count($payload['entry'] ?? [])]);
         ProcessWhatsAppWebhook::dispatch($payload);
 
-        return response()->json(['success' => true], 202);
+        return response()->json(['success' => true], 200);
     }
 
     /**

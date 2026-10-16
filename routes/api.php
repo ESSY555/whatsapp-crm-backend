@@ -194,7 +194,7 @@ Route::prefix('v1')->group(function () {
 
     // ---------------------------------------------------------- Webhooks
     Route::get('webhooks/whatsapp', [WhatsAppWebhookController::class, 'verify'])->middleware('throttle:60,1');
-    Route::post('webhooks/whatsapp', [WhatsAppWebhookController::class, 'receive'])->middleware('throttle:600,1');
+    Route::post('webhooks/whatsapp', [WhatsAppWebhookController::class, 'receive'])->middleware('throttle:2400,1');
 
     // API documentation (OpenAPI)
     Route::get('docs', fn () => response()->file(base_path('docs/openapi.yaml'), ['Content-Type' => 'application/yaml']));

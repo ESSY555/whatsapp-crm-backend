@@ -223,7 +223,9 @@ class BroadcastService
         $broadcast->update([
             'status' => 'completed',
             'completed_at' => now(),
+            'sent_count' => $broadcast->recipients()->whereIn('status', ['sent', 'delivered', 'read'])->count(),
             'delivered_count' => $broadcast->recipients()->whereIn('status', ['delivered', 'read'])->count(),
+            'failed_count' => $broadcast->recipients()->where('status', 'failed')->count(),
         ]);
         $this->notifications->broadcastCompleted($broadcast);
 
@@ -244,6 +246,7 @@ class BroadcastService
             'delivered' => 'delivered',
             'read' => 'read',
             'failed' => 'failed',
+            'sent' => 'sent',
             default => null,
         };
         if (!$status || $recipient->status === $status) {
@@ -255,6 +258,7 @@ class BroadcastService
         $broadcast = $recipient->broadcast;
         if ($broadcast) {
             $broadcast->update([
+                'sent_count' => $broadcast->recipients()->whereIn('status', ['sent', 'delivered', 'read'])->count(),
                 'delivered_count' => $broadcast->recipients()->whereIn('status', ['delivered', 'read'])->count(),
                 'failed_count' => $broadcast->recipients()->where('status', 'failed')->count(),
             ]);
