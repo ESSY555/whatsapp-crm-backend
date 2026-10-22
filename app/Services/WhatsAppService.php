@@ -54,6 +54,10 @@ class WhatsAppService
             }
         }
 
+        $business = $conversation->customer?->business ?: Business::query()->find(TenantManager::businessId());
+        $companyName = $business?->name;
+        $body = $this->appendSignature($body, $companyName);
+
         // Plan enforcement happens here so every send path is covered. It runs
         // before the transaction so the "limit reached" notification survives
         // the rejection.
@@ -138,12 +142,16 @@ class WhatsAppService
             'customer_business' => $customer->business_name,
             'business_name' => $business?->name,
             'company' => $business?->name,
+            'company_name' => $business?->name,
             'currency' => $currency,
         ];
 
         if ($invoice) {
             $vars += [
                 'invoice_number' => $invoice->invoice_number,
+                'subtotal' => $money($invoice->subtotal),
+                'discount' => $money($invoice->discount),
+                'tax' => $money($invoice->tax),
                 'amount' => $money($invoice->total),
                 'total' => $money($invoice->total),
                 'amount_paid' => $money($invoice->amount_paid),
@@ -280,5 +288,33 @@ class WhatsAppService
         $conversation->update(['last_message_at' => now(), 'status' => 'open']);
 
         return $message;
+    }
+
+    /**
+     * Ensure every outgoing message automatically ends with the sending company's name,
+     * avoiding duplicate signatures.
+     */
+    public function appendSignature(string $body, ?string $companyName): string
+    {
+        $companyName = trim((string) $companyName);
+        if ($companyName === '') {
+            return $body;
+        }
+
+        $trimmed = rtrim($body);
+        $escaped = preg_quote($companyName, '/');
+
+        // Check if the body already ends with the company's name as a signature:
+        // e.g. "— Company", "-- Company", "- Company", "\nCompany"
+        if (preg_match('/(?:[\—\-\–]{1,2}\s*' . $escaped . '|\n\s*' . $escaped . ')$/iu', $trimmed)) {
+            // If it ends with raw "\nCompanyName" without the dash, normalize to "\n\n— CompanyName"
+            if (preg_match('/(?<![\—\-\–])\n+\s*' . $escaped . '$/iu', $trimmed)) {
+                $withoutName = preg_replace('/\n+\s*' . $escaped . '$/iu', '', $trimmed);
+                return rtrim($withoutName) . "\n\n— {$companyName}";
+            }
+            return $trimmed;
+        }
+
+        return $trimmed . "\n\n— {$companyName}";
     }
 }

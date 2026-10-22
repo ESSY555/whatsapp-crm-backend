@@ -81,7 +81,8 @@ class WhatsAppMessagingTest extends TestCase
 
         Http::assertSent(fn ($request) => str_contains($request->url(), '/phone-1/messages')
             && $request['to'] === '2348030000001'
-            && $request['text']['body'] === 'Hello there'
+            && str_contains($request['text']['body'], 'Hello there')
+            && str_contains($request['text']['body'], $business->name)
             && $request->hasHeader('Authorization', 'Bearer secret-token'));
 
         $this->assertDatabaseHas('messages', ['id' => $messageId, 'status' => 'sent', 'whatsapp_message_id' => 'wamid.123']);
@@ -128,7 +129,7 @@ class WhatsAppMessagingTest extends TestCase
         $draft = $this->templateFor($business, ['status' => 'draft']);
 
         $this->actingAs($user)->postJson('/api/v1/messages', ['customer_id' => $customer->id, 'template_id' => $approved->id, 'template_variables' => ['code' => '42']])
-            ->assertCreated()->assertJsonPath('data.body', 'Hi Amaka, code 42.')->assertJsonPath('data.template_id', $approved->id);
+            ->assertCreated()->assertJsonPath('data.body', "Hi Amaka, code 42.\n\n— {$business->name}")->assertJsonPath('data.template_id', $approved->id);
 
         $this->actingAs($user)->postJson('/api/v1/messages', ['customer_id' => $customer->id, 'template_id' => $draft->id])
             ->assertUnprocessable()->assertJsonValidationErrors('template_id');
