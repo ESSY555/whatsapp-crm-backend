@@ -143,6 +143,7 @@ class SendWhatsAppMessage implements ShouldQueue
     {
         $message->update(['status' => 'failed', 'error_message' => $reason]);
         app(QuotaService::class)->recordFailed($message);
+        app(\App\Services\WalletService::class)->refundMessage($message, $reason);
         $notifications->messageFailed($message);
         // Keep broadcast recipient rows and counters in step with the failure.
         app(BroadcastService::class)->syncRecipientStatus($message);

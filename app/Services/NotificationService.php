@@ -88,4 +88,34 @@ class NotificationService
             ['connection_id' => $connection->id],
         );
     }
+
+    public function walletTopupApproved(\App\Models\TopupRequest $topup): ?Notification
+    {
+        return $this->notify(
+            'wallet_topup_approved',
+            'Wallet top-up approved',
+            sprintf('%s %s has been credited to your workspace wallet.', $topup->currency, number_format((float) $topup->amount, 2)),
+            ['topup_request_id' => $topup->id, 'amount' => (float) $topup->amount],
+        );
+    }
+
+    public function walletTopupRejected(\App\Models\TopupRequest $topup): ?Notification
+    {
+        return $this->notify(
+            'wallet_topup_rejected',
+            'Wallet top-up rejected',
+            sprintf('Your top-up of %s %s was rejected: %s', $topup->currency, number_format((float) $topup->amount, 2), $topup->rejection_reason),
+            ['topup_request_id' => $topup->id, 'reason' => $topup->rejection_reason],
+        );
+    }
+
+    public function lowWalletBalance(\App\Models\Wallet $wallet, float $threshold): ?Notification
+    {
+        return $this->notify(
+            'wallet_low_balance',
+            'Low wallet balance',
+            sprintf('Your wallet balance is %s %s, which is below the ₦%s threshold. Top up to keep sending WhatsApp messages.', $wallet->currency, number_format((float) $wallet->balance, 2), number_format($threshold, 2)),
+            ['balance' => (float) $wallet->balance, 'threshold' => $threshold],
+        );
+    }
 }

@@ -4,8 +4,10 @@ use App\Http\Controllers\Api\V1\Admin\BankAccountController as AdminBankAccountC
 use App\Http\Controllers\Api\V1\Admin\BusinessController as AdminBusinessController;
 use App\Http\Controllers\Api\V1\Admin\DashboardController as AdminDashboardController;
 use App\Http\Controllers\Api\V1\Admin\PaymentRequestController as AdminPaymentRequestController;
+use App\Http\Controllers\Api\V1\Admin\PaymentSettingController as AdminPaymentSettingController;
 use App\Http\Controllers\Api\V1\Admin\PlanController as AdminPlanController;
 use App\Http\Controllers\Api\V1\Admin\SystemController as AdminSystemController;
+use App\Http\Controllers\Api\V1\Admin\TopupRequestController as AdminTopupRequestController;
 use App\Http\Controllers\Api\V1\Admin\UserController as AdminUserController;
 use App\Http\Controllers\Api\V1\AuditLogController;
 use App\Http\Controllers\Api\V1\AuthController;
@@ -26,6 +28,7 @@ use App\Http\Controllers\Api\V1\ReportController;
 use App\Http\Controllers\Api\V1\ScheduledMessageController;
 use App\Http\Controllers\Api\V1\SearchController;
 use App\Http\Controllers\Api\V1\UserController;
+use App\Http\Controllers\Api\V1\WalletController;
 use App\Http\Controllers\Api\V1\WhatsAppConnectionController;
 use App\Http\Controllers\Api\V1\WhatsAppWebhookController;
 use App\Http\Middleware\SetTenantContext;
@@ -150,6 +153,14 @@ Route::prefix('v1')->group(function () {
         Route::post('billing/payment-requests', [BillingController::class, 'store'])->middleware(['business.role:owner', 'throttle:10,1']);
         Route::get('billing/payment-requests/{paymentRequest}/receipt', [BillingController::class, 'receipt'])->middleware('business.role:owner,manager');
 
+        // Tenant wallet & top-up requests
+        Route::get('wallet', [WalletController::class, 'show']);
+        Route::get('wallet/transactions', [WalletController::class, 'transactions'])->middleware('business.role:owner,manager');
+        Route::get('wallet/topups', [WalletController::class, 'topups'])->middleware('business.role:owner,manager');
+        Route::post('wallet/topups', [WalletController::class, 'submitTopup'])->middleware(['business.role:owner,manager', 'throttle:10,1']);
+        Route::get('wallet/topups/{topupRequest}/receipt', [WalletController::class, 'receipt'])->middleware('business.role:owner,manager');
+        Route::get('wallet/estimate', [WalletController::class, 'estimate']);
+
         Route::get('audit-logs', [AuditLogController::class, 'index'])->middleware('business.role:owner,manager');
         Route::get('audit-logs/{auditLog}', [AuditLogController::class, 'show'])->middleware('business.role:owner,manager');
 
@@ -174,6 +185,17 @@ Route::prefix('v1')->group(function () {
         Route::get('payment-requests/{paymentRequest}/receipt', [AdminPaymentRequestController::class, 'receipt']);
         Route::post('payment-requests/{paymentRequest}/approve', [AdminPaymentRequestController::class, 'approve']);
         Route::post('payment-requests/{paymentRequest}/decline', [AdminPaymentRequestController::class, 'decline']);
+
+        // Wallet top-up requests
+        Route::get('topup-requests', [AdminTopupRequestController::class, 'index']);
+        Route::get('topup-requests/{topupRequest}', [AdminTopupRequestController::class, 'show']);
+        Route::get('topup-requests/{topupRequest}/receipt', [AdminTopupRequestController::class, 'receipt']);
+        Route::post('topup-requests/{topupRequest}/approve', [AdminTopupRequestController::class, 'approve']);
+        Route::post('topup-requests/{topupRequest}/reject', [AdminTopupRequestController::class, 'reject']);
+
+        // Payment & pricing settings
+        Route::get('payment-settings', [AdminPaymentSettingController::class, 'show']);
+        Route::put('payment-settings', [AdminPaymentSettingController::class, 'update']);
 
         Route::apiResource('plans', AdminPlanController::class)->except('show');
         Route::apiResource('bank-accounts', AdminBankAccountController::class)->except('show')->parameters(['bank-accounts' => 'bankAccount']);

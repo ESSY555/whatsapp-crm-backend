@@ -21,8 +21,11 @@ use Illuminate\Validation\ValidationException;
  */
 class WhatsAppService
 {
-    public function __construct(private NotificationService $notifications, private QuotaService $quota)
-    {
+    public function __construct(
+        private NotificationService $notifications,
+        private QuotaService $quota,
+        private WalletService $wallet,
+    ) {
     }
 
     /**
@@ -58,19 +61,19 @@ class WhatsAppService
         $companyName = $business?->name;
         $body = $this->appendSignature($body, $companyName);
 
-        // Plan enforcement happens here so every send path is covered. It runs
-        // before the transaction so the "limit reached" notification survives
-        // the rejection.
+        // Plan and wallet enforcement happens here so every send path is covered.
         $category = $this->quota->categoryFor($conversation, $template, $data['source'] ?? 'manual');
-        $this->quota->assertCanSend($category);
+        $billingInfo = $this->quota->determineBillingSource($category);
 
-        return DB::transaction(function () use ($data, $conversation, $template, $variables, $body, $category) {
+        return DB::transaction(function () use ($data, $conversation, $template, $variables, $body, $category, $billingInfo, $business) {
             $message = Message::create([
                 'conversation_id' => $conversation->id,
                 'customer_id' => $conversation->customer_id,
                 'direction' => 'outbound',
                 'type' => $template?->whatsapp_template_id ? 'template' : 'text',
                 'billing_category' => $category,
+                'billing_source' => $billingInfo['source'],
+                'unit_price' => $billingInfo['unit_price'],
                 'template_id' => $template?->id,
                 'body' => $body,
                 'status' => 'queued',
@@ -80,6 +83,18 @@ class WhatsAppService
                     'invoice_id' => isset($data['invoice']) ? $data['invoice']->id : null,
                 ]),
             ]);
+
+            // If billed from wallet, atomically debit the wallet within the transaction
+            if ($billingInfo['source'] === 'wallet' && $billingInfo['unit_price'] > 0 && $business) {
+                $this->wallet->debit(
+                    $business,
+                    (float) $billingInfo['unit_price'],
+                    sprintf('WhatsApp %s message to %s', $category, $conversation->customer?->phone ?? 'customer'),
+                    (float) $billingInfo['unit_price'],
+                    "msg_{$message->id}",
+                    ['message_id' => $message->id, 'category' => $category]
+                );
+            }
 
             $conversation->update(['last_message_at' => now(), 'status' => 'open']);
 
@@ -225,6 +240,7 @@ class WhatsAppService
 
         if ($status === 'failed' && $currentStatus !== 'failed') {
             $this->quota->recordFailed($message);
+            $this->wallet->refundMessage($message, $errorMessage ?? 'Delivery failed');
             $this->notifications->messageFailed($message);
         }
 

@@ -8,6 +8,7 @@ use App\Models\Message;
 use App\Models\MessageTemplate;
 use App\Models\MessageUsage;
 use App\Models\Notification;
+use App\Models\PaymentSetting;
 use App\Models\Plan;
 use App\Models\Subscription;
 use App\Tenancy\TenantManager;
@@ -98,39 +99,121 @@ class QuotaService
      */
     public function assertCanSend(string $category, int $count = 1): void
     {
+        $this->determineBillingSource($category, $count);
+    }
+
+    /**
+     * Determine whether an outbound message is billed from the subscription quota,
+     * the tenant wallet, or is free (service window).
+     *
+     * Order:
+     * 1. Service window -> free.
+     * 2. Remaining subscription quota -> subscription (quota).
+     * 3. Wallet -> debit at current utility rate (utility category only).
+     *
+     * Throws ValidationException if both quota and wallet balance are insufficient.
+     */
+    public function determineBillingSource(string $category, int $count = 1): array
+    {
         $business = $this->business();
         if (!$business) {
-            return;
-        }
-
-        $plan = $this->billing->planFor($business);
-        if (!$plan) {
-            throw ValidationException::withMessages(['plan' => [$this->noPlanMessage($business)]]);
+            return ['source' => 'subscription', 'unit_price' => null];
         }
 
         $pool = self::poolFor($category);
         if ($pool === null) {
-            return; // service-window replies are free
+            return ['source' => 'free', 'unit_price' => null]; // service-window replies are free
         }
 
-        if ($pool === 'marketing' && !$plan->allows_broadcasts) {
-            throw ValidationException::withMessages(['plan' => [$this->marketingNotIncludedMessage($plan)]]);
-        }
+        $plan = $this->billing->planFor($business);
 
-        $remaining = $this->remaining($business, $plan, $pool);
-        if ($remaining !== null && $remaining < $count) {
-            $this->notifyExhausted($business, $pool, $plan);
-
-            if (!config('billing.hard_block', true)) {
-                return; // overage allowed; the exhausted notification flags it for review
+        // Marketing category: broadcasts & campaigns. Not covered by wallet in v1.
+        // TODO: In future phase, allow marketing templates to draw from wallet at marketing rate.
+        if ($pool === 'marketing') {
+            if (!$plan) {
+                throw ValidationException::withMessages(['plan' => [$this->noPlanMessage($business)]]);
+            }
+            if (!$plan->allows_broadcasts) {
+                throw ValidationException::withMessages(['plan' => [$this->marketingNotIncludedMessage($plan)]]);
             }
 
-            $quota = $plan->quotaFor($pool);
-            $message = $remaining === 0
-                ? sprintf('WhatsApp quota reached for this cycle: all %d included messages on your %s plan are used. Upgrade your plan or wait for the next cycle.', $quota, $plan->name)
-                : sprintf('This needs %d messages but only %d remain in this cycle on your %s plan.', $count, $remaining, $plan->name);
-            throw ValidationException::withMessages(['plan' => [$message]]);
+            $remaining = $this->remaining($business, $plan, 'marketing');
+            if ($remaining !== null && $remaining < $count) {
+                $this->notifyExhausted($business, 'marketing', $plan);
+                if (!config('billing.hard_block', true)) {
+                    return ['source' => 'subscription', 'unit_price' => null];
+                }
+                $quota = $plan->quotaFor('marketing');
+                $message = $remaining === 0
+                    ? sprintf('WhatsApp quota reached for this cycle: all %d included messages on your %s plan are used. Upgrade your plan or wait for the next cycle.', $quota, $plan->name)
+                    : sprintf('This needs %d messages but only %d remain in this cycle on your %s plan.', $count, $remaining, $plan->name);
+                throw ValidationException::withMessages(['plan' => [$message]]);
+            }
+
+            return ['source' => 'subscription', 'unit_price' => null];
         }
+
+        // Authentication category: billed from subscription utility pool. Not covered by wallet in v1.
+        // TODO: In future phase, allow authentication templates to draw from wallet at utility/auth rate.
+        if ($category === 'authentication') {
+            if (!$plan) {
+                throw ValidationException::withMessages(['plan' => [$this->noPlanMessage($business)]]);
+            }
+
+            $remaining = $this->remaining($business, $plan, 'utility');
+            if ($remaining !== null && $remaining < $count) {
+                $this->notifyExhausted($business, 'utility', $plan);
+                if (!config('billing.hard_block', true)) {
+                    return ['source' => 'subscription', 'unit_price' => null];
+                }
+                $quota = $plan->quotaFor('utility');
+                $message = $remaining === 0
+                    ? sprintf('WhatsApp quota reached for this cycle: all %d included messages on your %s plan are used. Upgrade your plan or wait for the next cycle.', $quota, $plan->name)
+                    : sprintf('This needs %d messages but only %d remain in this cycle on your %s plan.', $count, $remaining, $plan->name);
+                throw ValidationException::withMessages(['plan' => [$message]]);
+            }
+
+            return ['source' => 'subscription', 'unit_price' => null];
+        }
+
+        // Utility category:
+        // 1. Consume subscription quota first if available
+        if ($plan) {
+            $remaining = $this->remaining($business, $plan, 'utility');
+            if ($remaining === null || $remaining >= $count) {
+                return ['source' => 'subscription', 'unit_price' => null];
+            }
+            $this->notifyExhausted($business, 'utility', $plan);
+        }
+
+        // 2. Subscription quota exhausted (or expired / grace / no plan) -> evaluate wallet
+        $setting = PaymentSetting::current();
+        $unitPrice = $setting->calculatePricePerMessage('utility');
+        $totalCost = round($unitPrice * $count, 2);
+
+        $wallet = app(WalletService::class)->getOrCreateWallet($business);
+        $balance = (float) $wallet->balance;
+
+        if ($balance >= $totalCost) {
+            return ['source' => 'wallet', 'unit_price' => $unitPrice];
+        }
+
+        // 3. Both subscription quota and wallet are insufficient
+        if ($plan) {
+            if (!config('billing.hard_block', true)) {
+                return ['source' => 'subscription', 'unit_price' => null];
+            }
+            $quota = $plan->quotaFor('utility');
+            $remaining = $this->remaining($business, $plan, 'utility');
+            $message = $remaining === 0
+                ? sprintf('WhatsApp quota reached for this cycle: all %d included messages on your %s plan are used, and your wallet balance (₦%s) is insufficient (₦%s required). Top up your wallet or upgrade your plan.', $quota, $plan->name, number_format($balance, 2), number_format($totalCost, 2))
+                : sprintf('This needs %d messages but only %d remain in this cycle on your %s plan, and your wallet balance (₦%s) is insufficient (₦%s required).', $count, $remaining, $plan->name, number_format($balance, 2), number_format($totalCost, 2));
+            throw ValidationException::withMessages(['plan' => [$message], 'wallet' => [$message]]);
+        }
+
+        // Expired or no plan
+        $message = sprintf('No active plan quota and your wallet balance (₦%s) is insufficient (₦%s required). Top up your wallet under Billing to send messages.', number_format($balance, 2), number_format($totalCost, 2));
+        throw ValidationException::withMessages(['wallet' => [$message], 'plan' => [$message]]);
     }
 
     public function assertBroadcastsAllowed(): void

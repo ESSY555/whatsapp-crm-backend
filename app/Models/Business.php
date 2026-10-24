@@ -59,6 +59,21 @@ class Business extends Model
         return $this->hasMany(PaymentRequest::class);
     }
 
+    public function wallet(): \Illuminate\Database\Eloquent\Relations\HasOne
+    {
+        return $this->hasOne(Wallet::class);
+    }
+
+    public function walletTransactions(): HasMany
+    {
+        return $this->hasMany(WalletTransaction::class);
+    }
+
+    public function topupRequests(): HasMany
+    {
+        return $this->hasMany(TopupRequest::class);
+    }
+
     public function onTrial(): bool
     {
         return $this->trial_ends_at !== null && $this->trial_ends_at->isFuture();
