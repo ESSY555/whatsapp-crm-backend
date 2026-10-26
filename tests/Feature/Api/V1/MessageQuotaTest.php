@@ -258,4 +258,89 @@ class MessageQuotaTest extends TestCase
         $this->assertDatabaseMissing('notifications', ['business_id' => $business->id, 'type' => 'subscription_expiring']);
         $this->assertSame(0, app(QuotaService::class)->inFlightCount($business, MessageUsage::periodStartFor($business, $renewal), ['utility']));
     }
+
+    public function test_all_subscription_packages_allow_bulk_broadcasts_sharing_included_messages(): void
+    {
+        Queue::fake([SendWhatsAppMessage::class]);
+        $user = User::factory()->create();
+        $business = Business::create(['name' => 'Bulk Co', 'slug' => 'bulk-' . uniqid(), 'currency' => 'NGN', 'status' => 'active']);
+        $user->businesses()->attach($business->id, ['role' => 'owner', 'status' => 'active']);
+        $this->connectionFor($business);
+
+        $customer1 = $this->customerFor($business, ['phone' => '+2348030000001']);
+        $customer2 = $this->customerFor($business, ['phone' => '+2348030000002']);
+
+        // 1. Starter plan: allows broadcasts and has 10 messages included
+        $starterPlan = $this->plan('starter', [
+            'name' => 'Starter',
+            'price' => 15000,
+            'utility_quota' => 10,
+            'marketing_quota' => 0,
+            'allows_broadcasts' => true,
+        ]);
+        $this->subscribe($business, $starterPlan, 30);
+
+        // Can create and start a broadcast with 2 recipients
+        $res = $this->actingAs($user)->postJson('/api/v1/broadcasts', [
+            'name' => 'Sale Announcement',
+            'content' => 'Special discount for our customers!',
+            'customer_ids' => [$customer1->id, $customer2->id],
+            'send_now' => true,
+        ])->assertCreated();
+
+        $broadcastId = $res->json('data.id');
+        $this->assertDatabaseHas('broadcasts', ['id' => $broadcastId, 'total_recipients' => 2]);
+
+        // Process the broadcast batch
+        $broadcast = \App\Models\Broadcast::withoutGlobalScopes()->findOrFail($broadcastId);
+        $this->asTenant($business->id, fn () => app(\App\Services\BroadcastService::class)->processBatch($broadcast));
+
+        // 2 messages were sent
+        $messages = Message::withoutGlobalScopes()->where('business_id', $business->id)->get();
+        $this->assertCount(2, $messages);
+        foreach ($messages as $msg) {
+            $this->webhookStatus($business, $msg, 'delivered');
+        }
+
+        // Remaining included quota is decremented from 10 to 8
+        $billing = $this->actingAs($user)->getJson('/api/v1/billing')->json('data');
+        $this->assertSame(8, $billing['usage']['utility']['remaining']);
+        $this->assertSame(2, $billing['usage']['utility']['sent']);
+
+        // 2. Business package also allows broadcasts
+        $business->subscriptions()->update(['status' => 'expired']);
+        $bizPlan = $this->plan('business', [
+            'name' => 'Business',
+            'price' => 30000,
+            'utility_quota' => 50,
+            'marketing_quota' => 0,
+            'allows_broadcasts' => true,
+        ]);
+        $this->subscribe($business, $bizPlan, 30);
+
+        $this->actingAs($user)->postJson('/api/v1/broadcasts', [
+            'name' => 'Business Broadcast',
+            'content' => 'Hello from Business plan!',
+            'customer_ids' => [$customer1->id],
+            'send_now' => true,
+        ])->assertCreated();
+
+        // 3. Professional package also allows broadcasts
+        $business->subscriptions()->update(['status' => 'expired']);
+        $proPlan = $this->plan('professional', [
+            'name' => 'Professional',
+            'price' => 60000,
+            'utility_quota' => 100,
+            'marketing_quota' => 0,
+            'allows_broadcasts' => true,
+        ]);
+        $this->subscribe($business, $proPlan, 30);
+
+        $this->actingAs($user)->postJson('/api/v1/broadcasts', [
+            'name' => 'Pro Broadcast',
+            'content' => 'Hello from Pro plan!',
+            'customer_ids' => [$customer1->id],
+            'send_now' => true,
+        ])->assertCreated();
+    }
 }

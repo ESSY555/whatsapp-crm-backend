@@ -19,7 +19,7 @@ use Illuminate\Validation\ValidationException;
 
 class WalletService
 {
-    public const RECEIPT_DISK = 'private';
+    public const RECEIPT_DISK = 'local';
 
     public function __construct(
         private NotificationService $notifications,

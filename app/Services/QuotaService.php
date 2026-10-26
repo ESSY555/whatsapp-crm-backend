@@ -127,8 +127,7 @@ class QuotaService
 
         $plan = $this->billing->planFor($business);
 
-        // Marketing category: broadcasts & campaigns. Not covered by wallet in v1.
-        // TODO: In future phase, allow marketing templates to draw from wallet at marketing rate.
+        // Marketing category: broadcasts & campaigns.
         if ($pool === 'marketing') {
             if (!$plan) {
                 throw ValidationException::withMessages(['plan' => [$this->noPlanMessage($business)]]);
@@ -137,13 +136,17 @@ class QuotaService
                 throw ValidationException::withMessages(['plan' => [$this->marketingNotIncludedMessage($plan)]]);
             }
 
-            $remaining = $this->remaining($business, $plan, 'marketing');
+            // If an explicit isolated marketing_quota > 0 is configured on the plan, charge against it;
+            // otherwise, marketing/bulk messages share the plan's included messages quota (utility pool).
+            $poolToCharge = ($plan->marketing_quota !== null && $plan->marketing_quota > 0) ? 'marketing' : 'utility';
+
+            $remaining = $this->remaining($business, $plan, $poolToCharge);
             if ($remaining !== null && $remaining < $count) {
-                $this->notifyExhausted($business, 'marketing', $plan);
+                $this->notifyExhausted($business, $poolToCharge, $plan);
                 if (!config('billing.hard_block', true)) {
                     return ['source' => 'subscription', 'unit_price' => null];
                 }
-                $quota = $plan->quotaFor('marketing');
+                $quota = $plan->quotaFor($poolToCharge);
                 $message = $remaining === 0
                     ? sprintf('WhatsApp quota reached for this cycle: all %d included messages on your %s plan are used. Upgrade your plan or wait for the next cycle.', $quota, $plan->name)
                     : sprintf('This needs %d messages but only %d remain in this cycle on your %s plan.', $count, $remaining, $plan->name);
@@ -246,7 +249,11 @@ class QuotaService
 
         $subscription = $this->billing->currentSubscription($business);
         $periodStart = MessageUsage::periodStartFor($business, $subscription);
-        $categories = $pool === 'utility' ? self::UTILITY_POOL : [$pool];
+
+        $sharesMarketing = !($plan->marketing_quota !== null && $plan->marketing_quota > 0);
+        $categories = $pool === 'utility'
+            ? ($sharesMarketing ? ['utility', 'authentication', 'marketing'] : self::UTILITY_POOL)
+            : [$pool];
 
         $charged = (int) MessageUsage::withoutGlobalScopes()
             ->forCycle($business, $subscription)

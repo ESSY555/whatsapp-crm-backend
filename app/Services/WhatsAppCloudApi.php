@@ -232,7 +232,12 @@ class WhatsAppCloudApi
             $variables = $message->metadata['template_variables'] ?? [];
             $parameters = [];
             foreach ($template->placeholders() as $name) {
-                $parameters[] = ['type' => 'text', 'text' => (string) ($variables[$name] ?? '')];
+                $val = trim((string) ($variables[$name] ?? ''));
+                if ($val === '') {
+                    // Meta strictly disallows empty parameter text with error #131008
+                    $val = '-';
+                }
+                $parameters[] = ['type' => 'text', 'text' => $val];
             }
 
             return [

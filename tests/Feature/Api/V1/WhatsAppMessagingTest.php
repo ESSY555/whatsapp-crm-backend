@@ -135,6 +135,72 @@ class WhatsAppMessagingTest extends TestCase
             ->assertUnprocessable()->assertJsonValidationErrors('template_id');
     }
 
+    public function test_template_message_auto_populates_invoice_and_payment_variables(): void
+    {
+        Queue::fake();
+        [$user, $business] = $this->membership();
+        $this->connectionFor($business);
+        $customer = $this->customerFor($business, ['name' => 'Israel']);
+
+        // Create an invoice for this customer
+        $invoice = \App\Tenancy\TenantManager::runAs($business->id, function () use ($customer) {
+            $inv = new \App\Models\Invoice([
+                'customer_id' => $customer->id,
+                'invoice_number' => 'INV-2026-001',
+                'status' => 'sent',
+                'issue_date' => now(),
+                'due_date' => now()->addDays(7),
+            ]);
+            $inv->total = 15000;
+            $inv->subtotal = 15000;
+            $inv->balance_due = 15000;
+            $inv->save();
+            return $inv;
+        });
+
+        $paymentTpl = $this->templateFor($business, [
+            'name' => 'flowcrm_payment_received',
+            'whatsapp_template_id' => 'flowcrm_payment_received',
+            'content' => 'Hello {{customer_name}}, {{business_name}} has received your payment of {{amount}} for invoice {{invoice_number}}. Thank you for your business.',
+        ]);
+
+        // Sending without explicitly passing template_variables or invoice_id auto-links customer's invoice
+        $response = $this->actingAs($user)->postJson('/api/v1/messages', [
+            'customer_id' => $customer->id,
+            'template_id' => $paymentTpl->id,
+        ])->assertCreated();
+
+        $body = $response->json('data.body');
+        $this->assertStringContainsString('INV-2026-001', $body);
+        $this->assertStringContainsString('15,000.00', $body);
+        $this->assertStringContainsString('Israel', $body);
+        $this->assertStringContainsString($business->name, $body);
+
+        // Also test retrying a failed message that had empty variables: it re-populates the body!
+        $failedMessage = \App\Tenancy\TenantManager::runAs($business->id, function () use ($business, $customer, $paymentTpl) {
+            return \App\Models\Message::create([
+                'business_id' => $business->id,
+                'customer_id' => $customer->id,
+                'conversation_id' => $customer->conversations()->first()->id,
+                'direction' => 'outbound',
+                'type' => 'template',
+                'template_id' => $paymentTpl->id,
+                'billing_category' => 'utility',
+                'billing_source' => 'included',
+                'unit_price' => 0,
+                'body' => 'Hello Israel, ' . $business->name . ' has received your payment of  for invoice . Thank you for your business.',
+                'status' => 'failed',
+                'error_message' => '(#131008) Required parameter is missing',
+                'metadata' => ['template_variables' => []],
+            ]);
+        });
+
+        $retryResponse = $this->actingAs($user)->postJson("/api/v1/messages/{$failedMessage->id}/retry")->assertOk();
+        $retriedBody = $retryResponse->json('data.body');
+        $this->assertStringContainsString('INV-2026-001', $retriedBody);
+        $this->assertStringContainsString('15,000.00', $retriedBody);
+    }
+
     // -------------------------------------------------------- conversations
 
     public function test_conversations_list_show_update_and_message_listing(): void

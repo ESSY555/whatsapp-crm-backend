@@ -57,7 +57,7 @@ class PlanSeeder extends Seeder
                 'currency' => 'NGN',
                 'interval_days' => 30,
                 'marketing_quota' => 0,
-                'allows_broadcasts' => false,
+                'allows_broadcasts' => true,
             ]);
         }
 

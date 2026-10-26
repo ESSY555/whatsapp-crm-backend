@@ -42,13 +42,31 @@ class WhatsAppService
 
         $template = null;
         $variables = $data['template_variables'] ?? [];
+        $invoice = $data['invoice'] ?? null;
 
         if (!empty($data['template_id'])) {
             $template = MessageTemplate::query()->findOrFail($data['template_id']);
             if (!$template->isApproved()) {
                 throw ValidationException::withMessages(['template_id' => ["Template '{$template->name}' is not approved for sending."]]);
             }
-            $variables = array_merge($this->defaultVariables($conversation->customer, $data['invoice'] ?? null), $variables);
+
+            if (!$invoice && !empty($data['invoice_id'])) {
+                $invoice = Invoice::query()->find($data['invoice_id']);
+            }
+            if (!$invoice && $conversation->customer) {
+                $invoice = $conversation->customer->invoices()
+                    ->whereIn('status', ['sent', 'partially_paid', 'overdue', 'paid'])
+                    ->latest('id')
+                    ->first()
+                    ?? $conversation->customer->invoices()->latest('id')->first();
+            }
+
+            $defaults = $this->defaultVariables($conversation->customer, $invoice);
+            if (str_contains($template->name, 'payment_received') && !empty($defaults['payment_amount']) && empty($variables['amount'])) {
+                $defaults['amount'] = $defaults['payment_amount'];
+            }
+
+            $variables = array_merge($defaults, $variables);
             $body = $template->render($variables);
         } else {
             $body = trim((string) ($data['body'] ?? ''));
@@ -65,7 +83,7 @@ class WhatsAppService
         $category = $this->quota->categoryFor($conversation, $template, $data['source'] ?? 'manual');
         $billingInfo = $this->quota->determineBillingSource($category);
 
-        return DB::transaction(function () use ($data, $conversation, $template, $variables, $body, $category, $billingInfo, $business) {
+        return DB::transaction(function () use ($data, $conversation, $template, $variables, $body, $category, $billingInfo, $business, $invoice) {
             $message = Message::create([
                 'conversation_id' => $conversation->id,
                 'customer_id' => $conversation->customer_id,
@@ -80,7 +98,7 @@ class WhatsAppService
                 'metadata' => array_filter([
                     'template_variables' => $template ? $variables : null,
                     'source' => $data['source'] ?? 'manual',
-                    'invoice_id' => isset($data['invoice']) ? $data['invoice']->id : null,
+                    'invoice_id' => $invoice?->id ?? (isset($data['invoice']) ? $data['invoice']->id : null),
                 ]),
             ]);
 
@@ -111,6 +129,56 @@ class WhatsAppService
     {
         if ($message->status !== 'failed') {
             throw ValidationException::withMessages(['status' => ['Only failed messages can be retried.']]);
+        }
+
+        // If this message was a template message with missing or empty variables:
+        if ($message->type === 'template' && $message->template) {
+            $template = $message->template;
+            $customer = $message->customer;
+            $existingVars = $message->metadata['template_variables'] ?? [];
+
+            $hasMissing = false;
+            foreach ($template->placeholders() as $p) {
+                if (!isset($existingVars[$p]) || trim((string) $existingVars[$p]) === '') {
+                    $hasMissing = true;
+                    break;
+                }
+            }
+
+            if ($hasMissing && $customer) {
+                $invoice = null;
+                if (!empty($message->metadata['invoice_id'])) {
+                    $invoice = Invoice::query()->find($message->metadata['invoice_id']);
+                }
+                if (!$invoice) {
+                    $invoice = $customer->invoices()
+                        ->whereIn('status', ['sent', 'partially_paid', 'overdue', 'paid'])
+                        ->latest('id')
+                        ->first()
+                        ?? $customer->invoices()->latest('id')->first();
+                }
+
+                $defaults = $this->defaultVariables($customer, $invoice);
+                if (str_contains($template->name, 'payment_received') && !empty($defaults['payment_amount']) && empty($existingVars['amount'])) {
+                    $defaults['amount'] = $defaults['payment_amount'];
+                }
+
+                $newVars = array_merge($defaults, array_filter($existingVars, fn ($v) => trim((string) $v) !== ''));
+                $body = $template->render($newVars);
+                $business = $customer->business ?: Business::query()->find(TenantManager::businessId());
+                $body = $this->appendSignature($body, $business?->name);
+
+                $metadata = $message->metadata ?? [];
+                $metadata['template_variables'] = $newVars;
+                if ($invoice) {
+                    $metadata['invoice_id'] = $invoice->id;
+                }
+
+                $message->update([
+                    'body' => $body,
+                    'metadata' => $metadata,
+                ]);
+            }
         }
 
         $message->update(['status' => 'queued', 'error_message' => null]);
@@ -162,18 +230,37 @@ class WhatsAppService
         ];
 
         if ($invoice) {
+            $latestPayment = $invoice->payments()->where('status', 'completed')->latest('id')->first();
+            $paymentAmount = $latestPayment ? (float) $latestPayment->amount : ((float) $invoice->amount_paid > 0 ? (float) $invoice->amount_paid : (float) $invoice->total);
+
             $vars += [
                 'invoice_number' => $invoice->invoice_number,
                 'subtotal' => $money($invoice->subtotal),
                 'discount' => $money($invoice->discount),
                 'tax' => $money($invoice->tax),
                 'amount' => $money($invoice->total),
+                'payment_amount' => $money($paymentAmount),
                 'total' => $money($invoice->total),
                 'amount_paid' => $money($invoice->amount_paid),
                 'balance_due' => $money($invoice->balance_due),
                 'balance' => $money($invoice->balance_due),
                 'due_date' => $invoice->due_date?->format('M d, Y') ?? '',
                 'days_overdue' => (string) $invoice->daysOverdue(),
+            ];
+        } else {
+            $vars += [
+                'invoice_number' => 'N/A',
+                'subtotal' => $money(0),
+                'discount' => $money(0),
+                'tax' => $money(0),
+                'amount' => $money(0),
+                'payment_amount' => $money(0),
+                'total' => $money(0),
+                'amount_paid' => $money(0),
+                'balance_due' => $money(0),
+                'balance' => $money(0),
+                'due_date' => now()->format('M d, Y'),
+                'days_overdue' => '0',
             ];
         }
 

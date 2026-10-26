@@ -28,7 +28,7 @@ class TenantWalletTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        Storage::fake('private');
+        Storage::fake('local');
         PaymentSetting::current(); // Seed default settings
     }
 

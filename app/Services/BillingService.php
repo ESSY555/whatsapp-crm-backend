@@ -337,10 +337,13 @@ class BillingService
         $periodEnd = $subscription ? $subscription->ends_at : $business->trial_ends_at;
 
         $usage = MessageUsage::withoutGlobalScopes()->forCycle($business, $subscription)->get()->keyBy('category');
+        $sharesMarketing = !($plan && $plan->marketing_quota !== null && $plan->marketing_quota > 0);
+        $utilityCategories = $sharesMarketing ? ['utility', 'authentication', 'marketing'] : ['utility', 'authentication'];
         $quota = app(QuotaService::class);
-        $inFlightUtility = $quota->inFlightCount($business, $period, ['utility', 'authentication']);
+        $inFlightUtility = $quota->inFlightCount($business, $period, $utilityCategories);
         $inFlightMarketing = $quota->inFlightCount($business, $period, ['marketing']);
-        $utilityPoolSent = ($usage->get('utility')?->sent_count ?? 0) + ($usage->get('authentication')?->sent_count ?? 0);
+        $utilityPoolSent = collect($utilityCategories)->sum(fn ($c) => $usage->get($c)?->sent_count ?? 0);
+        $utilityPoolFailed = collect($utilityCategories)->sum(fn ($c) => $usage->get($c)?->failed_count ?? 0);
 
         $pending = PaymentRequest::withoutGlobalScopes()->where('business_id', $business->id)->pending()->with('plan')->latest()->first();
         $lastDeclined = PaymentRequest::withoutGlobalScopes()->where('business_id', $business->id)->where('status', 'declined')->with('plan')->latest('reviewed_at')->first();
@@ -377,9 +380,9 @@ class BillingService
             ] : null,
             'usage' => [
                 'period_start' => $period->toDateString(),
-                // Pools (what quotas apply to): utility + authentication share the included messages.
-                'utility' => $this->usageRow($utilityPoolSent, ($usage->get('utility')?->failed_count ?? 0) + ($usage->get('authentication')?->failed_count ?? 0), $plan?->quotaFor('utility'), $inFlightUtility),
-                'marketing' => $this->usageRow($usage->get('marketing')?->sent_count ?? 0, $usage->get('marketing')?->failed_count ?? 0, $plan && $plan->allows_broadcasts ? $plan->quotaFor('marketing') : 0, $inFlightMarketing),
+                // Pools (what quotas apply to): utility + authentication (+ marketing if shared) share the included messages.
+                'utility' => $this->usageRow($utilityPoolSent, $utilityPoolFailed, $plan?->quotaFor('utility'), $inFlightUtility),
+                'marketing' => $this->usageRow($usage->get('marketing')?->sent_count ?? 0, $usage->get('marketing')?->failed_count ?? 0, $sharesMarketing ? 0 : ($plan && $plan->allows_broadcasts ? $plan->quotaFor('marketing') : 0), $inFlightMarketing),
                 'service' => $this->usageRow($usage->get('service')?->sent_count ?? 0, $usage->get('service')?->failed_count ?? 0, null, 0),
                 // Raw per-category counts for the usage table.
                 'by_category' => collect(MessageUsage::CATEGORIES)->map(fn ($c) => [
